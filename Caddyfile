@@ -1,0 +1,31 @@
+# Internal TLS. Caddy issues a certificate from its own local CA; install the
+# root once per workstation (see docs/runbook.md) so browsers trust it without
+# a warning. No public ACME, no internet required.
+{
+	local_certs
+	admin off
+}
+
+{$PORTAL_HOSTNAME:portal.aktivacity.local} {
+	encode zstd gzip
+
+	# Project files can be large; do not let the proxy time out mid-upload.
+	request_body {
+		max_size 20GB
+	}
+
+	reverse_proxy app:3000 {
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+	}
+}

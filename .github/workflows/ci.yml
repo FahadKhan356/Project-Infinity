@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Tests (schema drift + migration integrity)
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  migrate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: aktivacity
+          POSTGRES_PASSWORD: aktivacity
+          POSTGRES_DB: aktivacity_test
+        options: >-
+          --health-cmd "pg_isready -U aktivacity"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://aktivacity:aktivacity@localhost:5432/aktivacity_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Apply migrations against a real PostgreSQL
+        run: npm run db:migrate
+      - name: Re-run to prove migrations are idempotent
+        run: npm run db:migrate
+      - name: Seed the first administrator
+        env:
+          ADMIN_EMAIL: ci@example.com
+          ADMIN_PASSWORD: ci-password-1234
+        run: npm run db:seed
+      - name: Policy matrix against a real database
+        run: npm test
