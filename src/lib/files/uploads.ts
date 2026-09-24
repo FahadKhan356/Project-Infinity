@@ -15,6 +15,7 @@ import {
 } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { MONTH_CLOSED_MESSAGE } from '@/lib/months/lifecycle';
+import { onDeliverableUploaded } from '@/lib/notifications/notify';
 import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 import {
   absolutePath,
@@ -326,6 +327,10 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
           uploadedBy: actor.id,
           notes: session.notes,
           isCurrent: true,
+        });
+        await onDeliverableUploaded(tx, {
+          deliverableId: deliverableId!, versionNo: versionNo!,
+          revisionNo: revision?.revisionNo ?? null, actorId: actor.id,
         });
 
         // A new version puts the slot back in the Team Lead's queue. The slot

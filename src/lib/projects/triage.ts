@@ -6,6 +6,7 @@ import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { onProjectRouted } from '@/lib/notifications/notify';
 
 export class TriageError extends Error {}
 
@@ -86,11 +87,13 @@ export async function triageProject(actor: Actor, input: TriageInput): Promise<T
       .select({
         id: projectDepartments.id,
         departmentId: projectDepartments.departmentId,
+        teamLeadId: projectDepartments.teamLeadId,
       })
       .from(projectDepartments)
       .where(eq(projectDepartments.projectId, input.projectId));
 
     const existingByDepartment = new Map(existing.map((row) => [row.departmentId, row.id]));
+    const previousLead = new Map(existing.map((row) => [row.departmentId, row.teamLeadId]));
 
     // Teams the PM removed. Refuse if work already hangs off them — losing a
     // deliverable silently is worse than making the PM cancel it explicitly.
@@ -151,6 +154,11 @@ export async function triageProject(actor: Actor, input: TriageInput): Promise<T
 
     const assignedTeams = [...requested.values()].filter((t) => t.teamLeadId !== null).length;
     const totalTeams = requested.size;
+    // Only a lead who was not already on this team is told (brief §20); a
+    // re-save that changes nothing does not ping anyone.
+    const newLeadIds = [...requested.values()]
+      .filter((t) => t.teamLeadId !== null && previousLead.get(t.departmentId) !== t.teamLeadId)
+      .map((t) => t.teamLeadId as number);
 
     // Every team has a lead, so the work can actually be planned. Until then
     // it stays visible as unfinished routing rather than looking scheduled.
@@ -173,6 +181,7 @@ export async function triageProject(actor: Actor, input: TriageInput): Promise<T
       })
       .where(eq(projects.id, input.projectId));
 
+    await onProjectRouted(tx, { projectId: input.projectId, newLeadIds, actorId: actor.id });
     return { projectId: input.projectId, status, assignedTeams, totalTeams };
   });
 }

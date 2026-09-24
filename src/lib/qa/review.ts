@@ -5,6 +5,7 @@ import type { Actor } from '@/lib/authz';
 import { can, canReviewDepartment } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { onQaReviewed } from '@/lib/notifications/notify';
 import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 import { syncAssignmentStatus, syncProjectStatus } from './project-status';
 
@@ -127,6 +128,11 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
     await tx.execute(sql`
       UPDATE deliverables SET status = ${newStatus}::deliverable_status WHERE id = ${slot.id}
     `);
+
+    await onQaReviewed(tx, {
+      deliverableId: Number(slot.id), versionNo, stage, decision: input.decision, newStatus,
+      comments, actorId: actor.id,
+    });
 
     if (slot.assignment_id !== null) await syncAssignmentStatus(tx, Number(slot.assignment_id));
     const revision = await openRevisionFor(tx, Number(slot.id));

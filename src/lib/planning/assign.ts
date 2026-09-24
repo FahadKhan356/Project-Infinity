@@ -5,6 +5,7 @@ import { assignments, departmentMembers, deliverables } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { onAssignmentCreated } from '@/lib/notifications/notify';
 
 export class PlanningError extends Error {}
 
@@ -162,6 +163,11 @@ export async function createAssignment(
       firstSequenceNo = start;
       lastSequenceNo = start + count - 1;
     }
+
+    await onAssignmentCreated(tx, {
+      projectId: Number(team.project_id), assignmentId: assignment.id, assigneeId: input.assigneeId,
+      title, deliverables: count, endDate: input.endDate ?? null, actorId: actor.id,
+    });
 
     return {
       assignmentId: assignment.id,

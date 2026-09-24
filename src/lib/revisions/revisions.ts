@@ -5,6 +5,7 @@ import type { Actor } from '@/lib/authz';
 import { can, revisionScope } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { onRevisionAssigned, onRevisionCreated } from '@/lib/notifications/notify';
 import { syncAssignmentStatus, syncProjectStatus } from '@/lib/qa/project-status';
 
 export class RevisionError extends Error {}
@@ -106,6 +107,10 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
     );
     for (const assignmentId of assignmentIds) await syncAssignmentStatus(tx, assignmentId);
     const projectStatus = await syncProjectStatus(tx, input.projectId);
+
+    await onRevisionCreated(tx, {
+      projectId: input.projectId, revisionId, revisionNo, title, deliverableIds, actorId: actor.id,
+    });
 
     return { revisionId, revisionNo, projectId: input.projectId, deliverableIds, projectStatus };
   });
@@ -238,6 +243,11 @@ export async function assignRevision(actor: Actor, input: AssignRevisionInput): 
     await tx.execute(sql`
       UPDATE revisions SET status = 'assigned' WHERE id = ${input.revisionId} AND status = 'new'
     `);
+    await onRevisionAssigned(tx, {
+      projectId: Number(revision.project_id), revisionId: input.revisionId,
+      revisionNo: Number(revision.revision_no), title: revision.title,
+      deliverableName: slot.name, assigneeId: input.assigneeId, actorId: actor.id,
+    });
 
     return {
       revisionId: input.revisionId,

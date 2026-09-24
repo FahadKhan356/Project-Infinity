@@ -4,6 +4,7 @@ import { projectDepartments, projects } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { onProjectFiled } from '@/lib/notifications/notify';
 import { allocateProjectCode, parseMonthValue, resolveClientMonth } from './intake';
 import { isClientVisible } from './queries';
 
@@ -167,6 +168,7 @@ export async function insertProject(
     }));
   await tx.insert(projectDepartments).values(rows);
 
+  await onProjectFiled(tx, { projectId: project.id, actorId: actor.id });
   return { projectId: project.id, projectCode: project.projectCode };
 }
 

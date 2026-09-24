@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
+import { unreadCount } from '@/lib/notifications/inbox';
 
 const ROLE_LABELS: Record<Actor['role'], string> = {
   ceo: 'CEO',
@@ -12,7 +13,8 @@ const ROLE_LABELS: Record<Actor['role'], string> = {
   executive: 'Executive',
 };
 
-export function AppShell({ actor, children }: { actor: Actor; children: React.ReactNode }) {
+export async function AppShell({ actor, children }: { actor: Actor; children: React.ReactNode }) {
+  const unread = await unreadCount(actor);
   return (
     <div className="flex min-h-svh flex-col">
       <header className="border-b border-border bg-surface">
@@ -67,6 +69,14 @@ export function AppShell({ actor, children }: { actor: Actor; children: React.Re
           </nav>
 
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <Link href="/notifications" className="text-muted hover:text-foreground" aria-label={`Inbox, ${unread} unread`}>
+              Inbox
+              {unread > 0 ? (
+                <span className="ml-1 rounded-full bg-accent px-1.5 py-0.5 text-xs font-medium text-white">
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              ) : null}
+            </Link>
             <form action="/search" method="get" role="search">
               <input name="q" type="search" placeholder="Search…" aria-label="Search projects"
                 className="w-40 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus:border-accent" />

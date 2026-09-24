@@ -32,8 +32,8 @@ uploads and permission-gated downloads; and one `Client → Month → Project`
 record that all of it hangs off.
 
 Phase 1b has begun: **revisions**, the **monthly archive** — close, reopen,
-copy forward, month summaries — and **global search** are in (below).
-Notifications and dashboards remain.
+copy forward, month summaries — **global search** and **notifications**
+are in (below). Per-role dashboards remain.
 
 ### Clients, months and intake
 
@@ -226,6 +226,25 @@ acceptance case holds by construction: an Executive searching a colleague's
 name finds nothing they could not already open. Revision text is further
 gated by `revisionScope`, and the people filters are offered only to roles
 that see across teams. Searches are plain GET URLs, so they can be shared.
+
+### Notifications
+
+Every step on the spine tells the people it concerns (brief §20), inside
+the same transaction that makes the change, and never the person who did
+it. Filing tells the Project Managers; routing tells each newly assigned
+Team Lead and the Sales owner; an assignment tells its Executive; an upload
+tells the lead of that team and the PM on the project; QA tells the
+Executive (approved, sent back), the PM when its sign-off is needed, the
+lead when the PM overrules them, and Sales when a file is ready for
+delivery or was rejected; a revision tells the PM, the leads of the teams
+it touches and the Executives on those slots; handing a revision out tells
+the person it went to. Deadline reminders are not stored: the inbox
+computes them from the work when opened — projects due within three days or
+overdue for anyone who sees projects, assignments for the person doing them
+and their lead — so nothing goes stale and there is no job to run.
+
+The inbox is at `/notifications`, with an unread badge in the header.
+Opening a notification marks it read and lands on what it is about.
 
 ### Activity
 

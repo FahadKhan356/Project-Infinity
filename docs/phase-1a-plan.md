@@ -169,7 +169,10 @@ differently.
 - **Global search + filters (§22) — DONE.** `lib/search`, `/search`, header
   search box. Covered by `tests/search.test.ts`, including the brief's own
   acceptance example.
-- Notifications, per-role dashboards — next.
+- **Notifications (§20) — DONE.** `lib/notifications`: events emitted inside
+  each mutation's transaction, the inbox with mark-read, live deadline
+  reminders. Covered by `tests/notifications.test.ts`.
+- Per-role dashboards (§21) — next, the last Phase 1b item.
 
 ## Open questions — blocking
 
