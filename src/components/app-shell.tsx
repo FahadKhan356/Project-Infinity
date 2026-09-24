@@ -53,6 +53,9 @@ export function AppShell({ actor, children }: { actor: Actor; children: React.Re
                 Deliveries
               </Link>
             ) : null}
+            <Link href="/revisions" className="text-muted hover:text-foreground">
+              Revisions
+            </Link>
             <Link href="/clients" className="text-muted hover:text-foreground">
               Clients
             </Link>

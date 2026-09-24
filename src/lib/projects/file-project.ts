@@ -3,8 +3,12 @@ import { getDb } from '@/db';
 import { projectDepartments, projects } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { allocateProjectCode, parseMonthValue, resolveClientMonth } from './intake';
 import { isClientVisible } from './queries';
+
+type Db = ReturnType<typeof getDb>;
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -53,13 +57,7 @@ export async function fileProject(
 
   const period = parseMonthValue(input.period);
   if (!period) throw new IntakeError('Choose the month this work belongs to.');
-
-  const title = input.title.trim();
-  if (title.length < 2) throw new IntakeError('Enter a project name.');
-
-  if (input.departments.length === 0) {
-    throw new IntakeError('Choose at least one team to deliver this work.');
-  }
+  validateProjectInput(input);
 
   const db = getDb();
   if (!(await isClientVisible(db, actor, input.clientId))) {
@@ -68,11 +66,6 @@ export async function fileProject(
     throw new IntakeError('Choose a client.');
   }
 
-  // Pricing is only accepted from someone allowed to see it, so a replayed
-  // form cannot set a price its sender was never shown (brief §23).
-  const priceAmount = can(actor, 'pricing.view') ? (input.priceAmount ?? null) : null;
-  const requiresPmQa = input.requiresPmQa ?? true;
-
   return db.transaction(async (tx) => {
     const month = await resolveClientMonth(tx, {
       clientId: input.clientId,
@@ -80,52 +73,101 @@ export async function fileProject(
       month: period.month,
       userId: actor.id,
     });
+    // A closed month is an archive (brief §36): nothing new is filed into it
+    // until someone with the right to do so reopens it.
+    await assertMonthOpen(tx, { clientMonthId: month.id }, (m) => new IntakeError(m));
 
-    const projectCode = await allocateProjectCode(tx, period.year);
-
-    const [project] = await tx
-      .insert(projects)
-      .values({
-        projectCode,
-        clientId: input.clientId,
-        clientMonthId: month.id,
-        title,
-        objective: input.objective ?? null,
-        description: input.description ?? null,
-        projectType: input.projectType ?? null,
-        poReference: input.poReference ?? null,
-        requirements: input.requirements ?? null,
-        clientNotes: input.clientNotes ?? null,
-        internalNotes: input.internalNotes ?? null,
-        deadline: input.deadline ?? null,
-        priority: input.priority ?? 'normal',
-        priceAmount,
-        salesOwnerId: actor.id,
-        requiresPmQa,
-        createdBy: actor.id,
-      })
-      .returning({ id: projects.id, projectCode: projects.projectCode });
-
-    // De-duplicated: a form can only name a team once, and the unique
-    // constraint would reject a repeat anyway.
-    const seen = new Set<number>();
-    const rows = input.departments
-      .filter((d) => !seen.has(d.departmentId) && seen.add(d.departmentId))
-      .map((d) => ({
-        projectId: project.id,
-        departmentId: d.departmentId,
-        plannedDeliverables: Math.max(0, d.plannedDeliverables | 0),
-        requiresPmQa,
-      }));
-    await tx.insert(projectDepartments).values(rows);
+    const project = await insertProject(tx, actor, {
+      ...input,
+      clientMonthId: month.id,
+      year: period.year,
+    });
 
     return {
-    projectId: project.id,
-    projectCode: project.projectCode,
-    clientMonthId: month.id,
-    monthCreated: month.created,
+      projectId: project.projectId,
+      projectCode: project.projectCode,
+      clientMonthId: month.id,
+      monthCreated: month.created,
     };
   });
+}
+
+/** The checks a project must pass whether it is typed in or copied forward. */
+export function validateProjectInput(input: Pick<ProjectIntakeInput, 'title' | 'departments'>): void {
+  if (input.title.trim().length < 2) throw new IntakeError('Enter a project name.');
+  if (input.departments.length === 0) {
+    throw new IntakeError('Choose at least one team to deliver this work.');
+  }
+}
+
+export interface InsertProjectInput extends Omit<ProjectIntakeInput, 'period'> {
+  /** An existing, open bucket of the same client. */
+  clientMonthId: number;
+  /** The year the project code is allocated in. */
+  year: number;
+  /** Set when the project is a copy of last month's order (brief §38). */
+  copiedFromProjectId?: number | null;
+}
+
+/**
+ * Writes one project and its team rows inside the caller's transaction. The
+ * caller has already checked the actor may file, the client is theirs and
+ * the month is open; this is the part that must be atomic with whatever
+ * else the caller is doing — copying a whole month, for instance.
+ */
+export async function insertProject(
+  tx: Tx,
+  actor: Actor,
+  input: InsertProjectInput,
+): Promise<{ projectId: number; projectCode: string }> {
+  validateProjectInput(input);
+  const title = input.title.trim();
+
+  // Pricing is only accepted from someone allowed to see it, so a replayed
+  // form cannot set a price its sender was never shown (brief §23).
+  const priceAmount = can(actor, 'pricing.view') ? (input.priceAmount ?? null) : null;
+  const requiresPmQa = input.requiresPmQa ?? true;
+
+  const projectCode = await allocateProjectCode(tx, input.year);
+
+  const [project] = await tx
+    .insert(projects)
+    .values({
+      projectCode,
+      clientId: input.clientId,
+      clientMonthId: input.clientMonthId,
+      title,
+      objective: input.objective ?? null,
+      description: input.description ?? null,
+      projectType: input.projectType ?? null,
+      poReference: input.poReference ?? null,
+      requirements: input.requirements ?? null,
+      clientNotes: input.clientNotes ?? null,
+      internalNotes: input.internalNotes ?? null,
+      deadline: input.deadline ?? null,
+      priority: input.priority ?? 'normal',
+      priceAmount,
+      salesOwnerId: actor.id,
+      requiresPmQa,
+      copiedFromProjectId: input.copiedFromProjectId ?? null,
+      createdBy: actor.id,
+    })
+    .returning({ id: projects.id, projectCode: projects.projectCode });
+
+  // De-duplicated: a form can only name a team once, and the unique
+  // constraint would reject a repeat anyway.
+  const seen = new Set<number>();
+  const rows = input.departments
+    .filter((d) => !seen.has(d.departmentId) && seen.add(d.departmentId))
+    .map((d) => ({
+      projectId: project.id,
+      departmentId: d.departmentId,
+      plannedDeliverables: Math.max(0, d.plannedDeliverables | 0),
+      requiresPmQa,
+    }));
+  await tx.insert(projectDepartments).values(rows);
+
+  return { projectId: project.id, projectCode: project.projectCode };
 }
 
 

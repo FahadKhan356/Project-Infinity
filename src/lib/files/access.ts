@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
+import { MONTH_CLOSED_MESSAGE, isProjectMonthClosed } from '@/lib/months/lifecycle';
 
 export interface FileContext {
   fileId: number;
@@ -134,6 +135,9 @@ export async function canUploadToDeliverable(
   if (!(await isProjectVisible(getDb(), actor, projectId))) {
     return { allowed: false, reason: 'No such deliverable.' };
   }
+  if (await isProjectMonthClosed(getDb(), projectId)) {
+    return { allowed: false, projectId, reason: MONTH_CLOSED_MESSAGE };
+  }
 
   const slot = {
     assigneeId: row.assignee_id === null ? null : Number(row.assignee_id),
@@ -164,5 +168,7 @@ export async function canAttachToProject(
   projectId: number,
 ): Promise<{ allowed: boolean; reason?: string }> {
   const visible = await isProjectVisible(getDb(), actor, projectId);
-  return visible ? { allowed: true } : { allowed: false, reason: 'No such project.' };
+  if (!visible) return { allowed: false, reason: 'No such project.' };
+  if (await isProjectMonthClosed(getDb(), projectId)) return { allowed: false, reason: MONTH_CLOSED_MESSAGE };
+  return { allowed: true };
 }

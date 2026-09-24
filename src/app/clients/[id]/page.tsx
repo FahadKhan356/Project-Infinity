@@ -6,8 +6,10 @@ import { departments } from '@/db/schema';
 import { requireActor } from '@/lib/auth/dal';
 import { AppShell } from '@/components/app-shell';
 import { can, clientScope, projectScope } from '@/lib/authz';
+import { monthSummaries } from '@/lib/months/queries';
 import { formatMoney, formatMonth } from '@/lib/projects/intake';
 import { ClientPanels } from './client-panels';
+import { MonthControls } from './month-controls';
 
 export default async function ClientPage(props: PageProps<'/clients/[id]'>) {
   const actor = await requireActor();
@@ -31,17 +33,9 @@ export default async function ClientPage(props: PageProps<'/clients/[id]'>) {
   if (!client) notFound();
 
   // Months newest first, each with the projects visible to this actor — the
-  // structure of §32–§36: one client, many months, many projects per month.
-  const months = await db.execute<{
-    id: number; period_year: number; period_month: number; status: string; project_count: number;
-  }>(sql`
-    SELECT cm.id, cm.period_year, cm.period_month, cm.status,
-           (SELECT count(*) FROM projects p
-             WHERE p.client_month_id = cm.id AND ${projectScope(actor, 'p')})::int AS project_count
-    FROM client_months cm
-    WHERE cm.client_id = ${clientId}
-    ORDER BY cm.period_year DESC, cm.period_month DESC
-  `);
+  // structure of §32–§36: one client, many months, many projects per month —
+  // and the §39 numbers for each.
+  const months = await monthSummaries(actor, clientId);
 
   const projectRows = await db.execute<{
     id: number; client_month_id: number; project_code: string; title: string;
@@ -84,7 +78,13 @@ export default async function ClientPage(props: PageProps<'/clients/[id]'>) {
       .orderBy(asc(departments.sortOrder)),
   ]);
 
-  const currentMonth = months[0];
+  // "Current" is the newest month still open; closed ones are the archive (§36).
+  const currentMonth = months.find((m) => m.status === 'open') ?? null;
+  const canCopy = can(actor, 'projects.create');
+  const canClose = can(actor, 'month.close');
+  const canReopen = can(actor, 'month.reopen');
+  const { copied } = await props.searchParams;
+  const copiedCount = Number(Array.isArray(copied) ? copied[0] : copied);
 
   return (
     <AppShell actor={actor}>
@@ -109,10 +109,17 @@ export default async function ClientPage(props: PageProps<'/clients/[id]'>) {
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
-        <Stat label="Current month" value={currentMonth ? formatMonth(Number(currentMonth.period_year), Number(currentMonth.period_month)) : '—'} />
+        <Stat label="Current month" value={currentMonth ? formatMonth(currentMonth.year, currentMonth.month) : '—'} />
         <Stat label="Projects visible to you" value={String(projectRows.length)} />
         <Stat label="Months on record" value={String(months.length)} />
       </div>
+
+      {Number.isInteger(copiedCount) && copiedCount > 0 ? (
+        <p role="status" className="mt-6 rounded-md bg-accent/10 px-3 py-2 text-sm">
+          Copied {copiedCount} project{copiedCount === 1 ? '' : 's'}. Each is filed as new and waits for
+          the Project Manager.
+        </p>
+      ) : null}
 
       <section className="mt-8">
         <h2 className="text-sm font-semibold">Months</h2>
@@ -122,18 +129,45 @@ export default async function ClientPage(props: PageProps<'/clients/[id]'>) {
           </p>
         ) : (
           <div className="mt-3 space-y-4">
-            {months.map((m, index) => {
-              const list = byMonth.get(Number(m.id)) ?? [];
+            {months.map((m) => {
+              const list = byMonth.get(m.id) ?? [];
+              const isCurrent = currentMonth !== null && m.id === currentMonth.id;
               return (
                 <div key={m.id} className="overflow-hidden rounded-lg border border-border bg-surface">
-                  <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                    <h3 className="text-sm font-medium">
-                      {formatMonth(Number(m.period_year), Number(m.period_month))}
-                      {index === 0 ? <span className="ml-2 text-xs text-accent">current</span> : null}
-                    </h3>
-                    <span className="text-xs text-muted">
-                      {m.status === 'closed' ? 'Closed' : 'Open'} · {list.length} project(s)
-                    </span>
+                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-2.5">
+                    <div>
+                      <h3 className="text-sm font-medium">
+                        {formatMonth(m.year, m.month)}
+                        {isCurrent ? <span className="ml-2 text-xs text-accent">current</span> : null}
+                        {m.status === 'closed' ? (
+                          <span className="ml-2 rounded border border-border px-1.5 py-0.5 text-xs text-muted">
+                            closed{m.closedBy ? ` by ${m.closedBy}` : ''}
+                          </span>
+                        ) : null}
+                      </h3>
+                      <p className="mt-0.5 text-xs text-muted">
+                        {m.projects} project{m.projects === 1 ? '' : 's'}
+                        {m.deliverables > 0 ? (
+                          <>
+                            {' · '}<span className="tabular-nums">{m.completed}/{m.deliverables}</span> delivered
+                            {m.inQa > 0 ? ` · ${m.inQa} in QA` : ''}
+                            {m.inRevision > 0 ? ` · ${m.inRevision} in revision` : ''}
+                            {m.pending > 0 ? ` · ${m.pending} pending` : ''}
+                          </>
+                        ) : null}
+                        {m.departments.length > 0 ? ` · ${m.departments.join(', ')}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      {canCopy && m.projects > 0 ? (
+                        <Link href={`/clients/${client.id}/months/${m.id}/copy`}
+                          className="rounded-md border border-border px-2.5 py-1 text-xs font-medium hover:bg-background">
+                          Copy to next month →
+                        </Link>
+                      ) : null}
+                      <MonthControls clientMonthId={m.id} status={m.status}
+                        canClose={canClose} canReopen={canReopen} />
+                    </div>
                   </div>
 
                   {list.length === 0 ? (

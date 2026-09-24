@@ -31,7 +31,9 @@ permission grants; a policy layer that every list query composes; resumable
 uploads and permission-gated downloads; and one `Client → Month → Project`
 record that all of it hangs off.
 
-Phase 1b (revisions, copy-month, search, notifications, dashboards) is next.
+Phase 1b has begun: **revisions** and the **monthly archive** — close,
+reopen, copy forward, month summaries — are in (below). Search,
+notifications and dashboards remain.
 
 ### Clients, months and intake
 
@@ -152,6 +154,65 @@ Project status follows the work from here (§18, §26): every slot approved →
 `ready_for_delivery`; every slot delivered → `delivered`; every delivery
 completed → `completed`, with `completed_at` set. An assignment closes when its
 last slot is signed off.
+
+### Revisions
+
+When the client comes back, Sales opens a revision from the delivery panel or
+the project (§15): a title, the client's words, details, which deliverables it
+is about, priority and deadline. Numbering is per project, so the client's
+"#03" is ours. Opening one does three things at once: the slots go back to
+`changes_requested` (so the Executive's list says "to redo"), the delivery
+that came back is marked `revision_required` (§14), and the project says
+`revision_required` (§18).
+
+Who sees it is `revisionScope` in the policy layer (§16): a revision is
+visible when its project is, and a Team Lead additionally sees only the ones
+touching a deliverable in their team — the Design lead does not see the note
+about the video. The Executive sees it on their slot in the workspace, client
+feedback and all.
+
+The Team Lead hands it out from the revision page (§17): the slot moves to an
+open assignment of the chosen Executive on the same team, or a new one titled
+after the revision with the feedback as its instructions. The slot never moves
+teams and is never duplicated, so history stays on "Video 01". The Executive's
+upload is tagged with the revision and becomes the next version of the same
+slot; QA and delivery run exactly as before. The revision's status is derived
+from its slots — `assigned`, `in_progress`, `awaiting_qa`, `approved`,
+`delivered` — and only `closed` and `cancelled` are decisions, made by Sales
+or the PM. Cancelling gives untouched slots back their delivered state; either
+ending lets the project follow the work again.
+
+### The monthly archive
+
+A client's history is read by the month (§33), so the month is the unit that
+closes:
+
+- **Closing.** Sales or the Project Manager closes a month from the client
+  page (§36). It closes only when every project in it is completed or
+  cancelled; otherwise the refusal names the projects still open. An empty
+  month closes freely. The client page shows who closed it.
+- **Read-only, everywhere.** Once closed, every mutation on a project in that
+  month is refused server-side — filing into it, triage, assignment, upload
+  (both at the gate and again when an in-flight upload completes), QA,
+  delivery, comments, revisions, internal notes. The rule is one function,
+  `assertMonthOpen`, called by each module before it writes; the workspace
+  carries a `monthClosed` flag so the page offers no buttons it would refuse.
+  Reading is untouched: the archive is there to be read.
+- **Reopening** is a separate capability (`month.reopen`: management and
+  admin, or a per-user grant), so Sales cannot unlock what they archived.
+- **Copy forward** (§38). From any month with projects, "Copy to next month"
+  lists every live order in it with the parts Sales may change — name, teams
+  and quantities, deadline (moved forward by the same gap), price,
+  requirements, notes — each ticked by default. Untick a project to leave it
+  behind, untick a team to drop it. Each copy is a new project with a new
+  code, filed as `new` for the Project Manager, with `copied_from_project_id`
+  recording where it came from. Nothing else travels: no slots, assignments,
+  files or revisions. The whole copy is one transaction into an open (or
+  newly opened) target month.
+- **Month summaries** (§35, §39). Each month on the client page reports its
+  projects, delivered/total deliverables, what is in QA, in revision or
+  pending, and the teams involved — scoped, so an Executive's numbers cover
+  only the projects they can open.
 
 ### Activity
 

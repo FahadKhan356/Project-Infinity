@@ -4,6 +4,8 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { can, canReviewDepartment } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
+import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 import { syncAssignmentStatus, syncProjectStatus } from './project-status';
 
 export class QaError extends Error {}
@@ -64,6 +66,7 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
   if (!slot || !(await isProjectVisible(db, actor, Number(slot.project_id)))) {
     throw new QaError('No such deliverable.');
   }
+  await assertMonthOpen(db, { projectId: Number(slot.project_id) }, (m) => new QaError(m));
 
   let stage: QaStage;
   if (slot.status === 'awaiting_lead_qa') stage = 'team_lead';
@@ -126,6 +129,8 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
     `);
 
     if (slot.assignment_id !== null) await syncAssignmentStatus(tx, Number(slot.assignment_id));
+    const revision = await openRevisionFor(tx, Number(slot.id));
+    if (revision) await syncRevisionStatus(tx, revision.id);
     const projectStatus = await syncProjectStatus(tx, projectId);
 
     return {

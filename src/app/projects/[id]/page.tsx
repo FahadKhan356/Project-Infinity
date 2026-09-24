@@ -28,7 +28,7 @@ export default async function ProjectPage(props: PageProps<'/projects/[id]'>) {
     client_notes: string | null; internal_notes: string | null;
     deadline: string | null; price_amount: string | null; price_currency: string;
     requires_pm_qa: boolean; client_id: number; client_name: string;
-    period_year: number; period_month: number; sales_owner: string | null;
+    period_year: number; period_month: number; month_status: string; sales_owner: string | null;
     project_manager: string | null; created_at: Date;
   }>(sql`
     SELECT p.id, p.project_code, p.title, p.status, p.priority, p.objective, p.description,
@@ -37,7 +37,7 @@ export default async function ProjectPage(props: PageProps<'/projects/[id]'>) {
            ${showPricing ? sql`p.price_amount` : sql`NULL::numeric`} AS price_amount,
            ${can(actor, 'projects.viewAll') || can(actor, 'projects.create')
              ? sql`p.internal_notes` : sql`NULL::text`} AS internal_notes,
-           c.name AS client_name, cm.period_year, cm.period_month,
+           c.name AS client_name, cm.period_year, cm.period_month, cm.status AS month_status,
            so.full_name AS sales_owner, pm.full_name AS project_manager
     FROM projects p
     JOIN clients c        ON c.id = p.client_id
@@ -132,6 +132,20 @@ export default async function ProjectPage(props: PageProps<'/projects/[id]'>) {
         </span>
       </div>
 
+      {project.month_status === 'closed' ? (
+        <p role="status" className="mt-4 rounded-md border border-border bg-surface px-4 py-3 text-sm">
+          <span className="font-medium">
+            {formatMonth(Number(project.period_year), Number(project.period_month))} is closed.
+          </span>{' '}
+          <span className="text-muted">
+            This project is part of the client’s archive and is read-only.
+            {can(actor, 'month.reopen')
+              ? ' You can reopen the month from the client page.'
+              : ' Management can reopen the month if something needs to change.'}
+          </span>
+        </p>
+      ) : null}
+
       <div className="mt-6 grid gap-4 sm:grid-cols-4">
         <Stat label="Deadline" value={project.deadline ?? '—'} />
         <Stat label="Priority" value={project.priority} />
@@ -173,7 +187,7 @@ export default async function ProjectPage(props: PageProps<'/projects/[id]'>) {
         </div>
       </section>
 
-      {can(actor, 'projects.triage') ? (
+      {can(actor, 'projects.triage') && project.month_status !== 'closed' ? (
         <TriagePanel
           projectId={project.id}
           departments={triageDepartments}

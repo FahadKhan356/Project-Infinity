@@ -1,12 +1,17 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 import { eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { clientContacts, clientServices, clients } from '@/db/schema';
 import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import { assertCan, can } from '@/lib/authz';
+import { copyMonth, parseCopyForm } from '@/lib/months/copy';
+import { MonthError, closeMonth, reopenMonth } from '@/lib/months/lifecycle';
+import { IntakeError } from '@/lib/projects/file-project';
+import { formatMonth } from '@/lib/projects/intake';
 import { isClientVisible } from '@/lib/projects/queries';
 
 export interface ClientFormState {
@@ -174,4 +179,120 @@ export async function createNextMonth(
 
   revalidatePath(`/clients/${clientId}`);
   return { notice: 'Month opened.' };
+}
+
+/** Sales (or the PM) archives a finished month (brief §36). */
+export async function closeClientMonth(
+  _prev: ClientFormState,
+  formData: FormData,
+): Promise<ClientFormState> {
+  const actor = await requireActor();
+  const clientMonthId = Number(formData.get('clientMonthId'));
+  if (!Number.isInteger(clientMonthId)) return { error: 'Unknown month.' };
+
+  let result;
+  try {
+    result = await closeMonth(actor, { clientMonthId });
+  } catch (error) {
+    if (error instanceof MonthError) return { error: error.message };
+    throw error;
+  }
+
+  await recordActivity({
+    actorId: actor.id,
+    action: 'client.month_closed',
+    entityType: 'client_month',
+    entityId: result.clientMonthId,
+    clientId: result.clientId,
+    metadata: { year: result.year, month: result.month, projectCount: result.projectCount },
+  });
+
+  revalidatePath(`/clients/${result.clientId}`);
+  return { notice: `${formatMonth(result.year, result.month)} closed.` };
+}
+
+/** Management unlocks an archived month so its records can change (brief §36). */
+export async function reopenClientMonth(
+  _prev: ClientFormState,
+  formData: FormData,
+): Promise<ClientFormState> {
+  const actor = await requireActor();
+  const clientMonthId = Number(formData.get('clientMonthId'));
+  if (!Number.isInteger(clientMonthId)) return { error: 'Unknown month.' };
+
+  let result;
+  try {
+    result = await reopenMonth(actor, { clientMonthId });
+  } catch (error) {
+    if (error instanceof MonthError) return { error: error.message };
+    throw error;
+  }
+
+  await recordActivity({
+    actorId: actor.id,
+    action: 'client.month_reopened',
+    entityType: 'client_month',
+    entityId: result.clientMonthId,
+    clientId: result.clientId,
+    metadata: { year: result.year, month: result.month },
+  });
+
+  revalidatePath(`/clients/${result.clientId}`);
+  return { notice: `${formatMonth(result.year, result.month)} reopened.` };
+}
+
+/** Sales copies last month's orders forward (brief §38). */
+export async function copyClientMonth(
+  _prev: ClientFormState,
+  formData: FormData,
+): Promise<ClientFormState> {
+  const actor = await requireActor();
+
+  let result;
+  try {
+    const input = parseCopyForm(formData);
+    if (!Number.isInteger(input.clientId) || !Number.isInteger(input.fromMonthId)) {
+      return { error: 'Unknown month.' };
+    }
+    result = await copyMonth(actor, input);
+  } catch (error) {
+    if (error instanceof MonthError || error instanceof IntakeError) return { error: error.message };
+    throw error;
+  }
+
+  const [from] = await getDb().execute<{ period_year: number; period_month: number }>(sql`
+    SELECT period_year, period_month FROM client_months WHERE id = ${Number(formData.get('fromMonthId'))}
+  `);
+  const fromLabel = from ? formatMonth(Number(from.period_year), Number(from.period_month)) : null;
+
+  await recordActivity({
+    actorId: actor.id,
+    action: 'client.month_copied',
+    entityType: 'client_month',
+    entityId: result.clientMonthId,
+    clientId: result.clientId,
+    metadata: {
+      year: result.year, month: result.month, fromLabel,
+      projectCount: result.projects.length, monthCreated: result.monthCreated,
+      projectCodes: result.projects.map((p) => p.projectCode),
+    },
+  });
+  // Each new project also gets its own first line, so its feed starts the
+  // way every other project's does — and says where it came from.
+  for (const p of result.projects) {
+    await recordActivity({
+      actorId: actor.id,
+      action: 'project.created',
+      entityType: 'project',
+      entityId: p.projectId,
+      projectId: p.projectId,
+      clientId: result.clientId,
+      metadata: { projectCode: p.projectCode, copiedFromCode: p.copiedFromCode, copiedFromId: p.copiedFromId },
+    });
+  }
+
+  revalidatePath('/projects');
+  revalidatePath('/triage');
+  revalidatePath(`/clients/${result.clientId}`);
+  redirect(`/clients/${result.clientId}?copied=${result.projects.length}`);
 }

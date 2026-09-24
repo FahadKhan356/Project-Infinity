@@ -4,7 +4,9 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { can, projectScope } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { syncProjectStatus } from '@/lib/qa/project-status';
+import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 
 export class DeliveryError extends Error {}
 
@@ -94,6 +96,8 @@ export async function deliveryQueue(
     LEFT JOIN users db_u        ON db_u.id = dl.delivered_by
     WHERE ${projectScope(actor, 'p')}
       AND ${options.includeCompleted ? sql`true` : sql`dl.status <> 'completed'`}
+      -- a slot re-approved after a revision has a newer delivery; the old one is history
+      AND dl.id = (SELECT max(id) FROM deliveries WHERE deliverable_id = dl.deliverable_id)
     ORDER BY
       CASE dl.status WHEN 'pending_delivery' THEN 0 WHEN 'revision_required' THEN 1
                      WHEN 'client_feedback_received' THEN 2 WHEN 'delivered' THEN 3 ELSE 4 END,
@@ -161,6 +165,7 @@ export async function updateDelivery(actor: Actor, input: DeliveryUpdate): Promi
   if (!delivery || !(await isProjectVisible(db, actor, Number(delivery.project_id)))) {
     throw new DeliveryError('No such delivery.');
   }
+  await assertMonthOpen(db, { projectId: Number(delivery.project_id) }, (m) => new DeliveryError(m));
 
   if (!DELIVERY_TRANSITIONS[delivery.status].includes(input.status)) {
     throw new DeliveryError(
@@ -186,6 +191,8 @@ export async function updateDelivery(actor: Actor, input: DeliveryUpdate): Promi
       await tx.execute(sql`
         UPDATE deliverables SET status = 'delivered' WHERE id = ${deliverableId} AND status = 'approved'
       `);
+      const revision = await openRevisionFor(tx, deliverableId);
+      if (revision) await syncRevisionStatus(tx, revision.id);
     }
 
     const projectStatus = await syncProjectStatus(tx, projectId);

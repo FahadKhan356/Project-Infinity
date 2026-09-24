@@ -7,6 +7,7 @@ import { getDb } from '@/db';
 import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import { can, projectScope } from '@/lib/authz';
+import { MonthError, assertMonthOpen } from '@/lib/months/lifecycle';
 import { IntakeError, fileProject, parseProjectForm } from '@/lib/projects/file-project';
 import { WorkspaceError, addComment } from '@/lib/workspace/comments';
 
@@ -67,6 +68,12 @@ export async function updateInternalNotes(
   if (visible.length === 0) return { error: 'Unknown project.' };
   if (!can(actor, 'projects.create') && !can(actor, 'projects.triage')) {
     return { error: 'You are not permitted to edit this project.' };
+  }
+  try {
+    await assertMonthOpen(getDb(), { projectId });
+  } catch (error) {
+    if (error instanceof MonthError) return { error: error.message };
+    throw error;
   }
 
   const notes = String(formData.get('internalNotes') ?? '').trim() || null;

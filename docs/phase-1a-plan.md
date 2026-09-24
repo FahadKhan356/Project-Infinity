@@ -155,6 +155,19 @@ All seven milestones are built and their acceptance criteria are covered by
 they blocked a milestone; each is a small change if the client answers
 differently.
 
+## Phase 1b progress
+
+- **Revisions (§15–17) — DONE.** `revisionScope` in `lib/authz`, create / hand
+  off / close in `lib/revisions`, status derived from the slots, `/revisions`
+  pages, upload tagging, and the delivery panel's "open a revision" link.
+  Covered by `tests/revisions.test.ts`.
+- **Monthly archive (§33, §36–§39) — DONE.** `lib/months`: close (refused
+  while any project is unsettled), reopen (separate capability), the
+  `assertMonthOpen` guard called by every mutation module, copy-previous-month
+  as one transaction with `copied_from_project_id` lineage, and per-month
+  summaries on the client page. Covered by `tests/months.test.ts`.
+- Global search + filters, notifications, per-role dashboards — next.
+
 ## Open questions — blocking
 
 1. **Progress counting** — approved or uploaded? (blocks M5/M7; see above) — *Built as approved/total, with uploaded and in-QA counts shown beside it. Confirm.*
@@ -166,7 +179,12 @@ differently.
 
 ## Open questions — non-blocking, needed before 1b
 
-7. Who closes a month, and can a month close with open deliverables?
+7. ~~Who closes a month, and can a month close with open deliverables?~~ —
+   **resolved by design, confirm.** Sales and the PM close (`month.close`);
+   management and admin reopen (`month.reopen`). A month closes only when
+   every project in it is completed or cancelled — the refusal names the
+   ones still open. If closing with open work is wanted, it is a flag on
+   `closeMonth`, not a redesign.
 8. How is a project spanning two months attributed — month of creation, or month of delivery?
 9. Is pricing per project only, or is there also a monthly retainer figure per client-month?
 10. User count and peak concurrent uploads?

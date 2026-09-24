@@ -3,7 +3,9 @@ import { sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { comments } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
+import { revisionScope } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
 
 export class WorkspaceError extends Error {}
 
@@ -13,6 +15,7 @@ export interface CommentInput {
   /** Exactly one of these. */
   projectId?: number;
   deliverableId?: number;
+  revisionId?: number;
   body: string;
 }
 
@@ -37,7 +40,14 @@ export async function addComment(actor: Actor, input: CommentInput): Promise<Com
   const db = getDb();
   let projectId: number;
 
-  if (input.deliverableId !== undefined) {
+  if (input.revisionId !== undefined) {
+    const rows = await db.execute<{ project_id: number }>(sql`
+      SELECT r.project_id FROM revisions r WHERE r.id = ${input.revisionId} AND ${revisionScope(actor, 'r')}
+    `);
+    const row = rows[0];
+    if (!row) throw new WorkspaceError('No such revision.');
+    projectId = Number(row.project_id);
+  } else if (input.deliverableId !== undefined) {
     const rows = await db.execute<{ project_id: number }>(sql`
       SELECT project_id FROM deliverables WHERE id = ${input.deliverableId}
     `);
@@ -55,14 +65,17 @@ export async function addComment(actor: Actor, input: CommentInput): Promise<Com
   } else {
     throw new WorkspaceError('A comment needs something to attach to.');
   }
+  // An archived month keeps its thread as it was (brief §36).
+  await assertMonthOpen(db, { projectId }, (m) => new WorkspaceError(m));
 
   const [inserted] = await db
     .insert(comments)
     .values({
       authorId: actor.id,
       body,
-      projectId: input.deliverableId === undefined ? projectId : null,
+      projectId: input.deliverableId === undefined && input.revisionId === undefined ? projectId : null,
       deliverableId: input.deliverableId ?? null,
+      revisionId: input.revisionId ?? null,
     })
     .returning({ id: comments.id });
 

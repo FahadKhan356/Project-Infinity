@@ -122,6 +122,33 @@ export function clientScope(actor: Actor, alias = 'clients'): SQL {
 }
 
 /**
+ * Row visibility for revisions (brief §16). A revision is visible when its
+ * project is. A Team Lead additionally sees only revisions that touch a
+ * deliverable in a team they lead — the Design lead does not see the
+ * client's note about the video.
+ */
+export function revisionScope(actor: Actor, alias = 'revisions'): SQL {
+  if (!actor.isActive) return NONE;
+  const r = identifier(alias);
+  const viaProject = sql`EXISTS (
+    SELECT 1 FROM projects scope_rp
+    WHERE scope_rp.id = ${r}.project_id AND ${projectScope(actor, 'scope_rp')}
+  )`;
+
+  if (actor.role === 'team_lead' && !can(actor, 'projects.viewAll')) {
+    if (actor.leadDepartmentIds.length === 0) return NONE;
+    return sql`(${viaProject} AND EXISTS (
+      SELECT 1 FROM revision_deliverables scope_rd
+      JOIN deliverables scope_rdd        ON scope_rdd.id = scope_rd.deliverable_id
+      JOIN project_departments scope_rpd ON scope_rpd.id = scope_rdd.project_department_id
+      WHERE scope_rd.revision_id = ${r}.id
+        AND scope_rpd.department_id IN (${idList(actor.leadDepartmentIds)})
+    ))`;
+  }
+  return viaProject;
+}
+
+/**
  * Field-level rule for pricing (brief §3, §23). Pricing is stripped on the
  * server — never sent to the browser and hidden with CSS.
  */

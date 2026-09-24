@@ -14,6 +14,8 @@ import {
   uploadSessions,
 } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
+import { MONTH_CLOSED_MESSAGE } from '@/lib/months/lifecycle';
+import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 import {
   absolutePath,
   attachmentRelativePath,
@@ -189,6 +191,8 @@ export interface CompletedUpload {
   deliverableId: number | null;
   deliverableName: string | null;
   versionNo: number | null;
+  /** Set when this version answers an open revision (brief §17). */
+  revisionNo: number | null;
   projectId: number | null;
 }
 
@@ -225,6 +229,7 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
       let deliverableId: number | null = null;
       let deliverableName: string | null = null;
       let versionNo: number | null = null;
+      let revision: { id: number; revisionNo: number } | null = null;
       let projectId: number | null = null;
 
       if (session.target === 'deliverable') {
@@ -238,21 +243,24 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
         if (locked.length === 0) throw new UploadError(404, 'That deliverable no longer exists.');
 
         const located = await tx.execute<{
-          client_id: number; period_year: number; period_month: number;
+          client_id: number; period_year: number; period_month: number; month_status: string;
           project_id: number; deliverable_name: string; next_version: number;
         }>(sql`
-          SELECT p.client_id, cm.period_year, cm.period_month, p.id AS project_id,
-                 d.name AS deliverable_name,
+          SELECT p.client_id, cm.period_year, cm.period_month, cm.status AS month_status,
+                 p.id AS project_id, d.name AS deliverable_name,
                  COALESCE(MAX(dv.version_no), 0) + 1 AS next_version
           FROM deliverables d
           JOIN projects p       ON p.id = d.project_id
           JOIN client_months cm ON cm.id = p.client_month_id
           LEFT JOIN deliverable_versions dv ON dv.deliverable_id = d.id
           WHERE d.id = ${session.deliverableId}
-          GROUP BY p.client_id, cm.period_year, cm.period_month, p.id, d.name
+          GROUP BY p.client_id, cm.period_year, cm.period_month, cm.status, p.id, d.name
         `);
         const loc = located[0];
         if (!loc) throw new UploadError(404, 'That deliverable no longer exists.');
+        // The session was opened while the month was open; it may have
+        // closed since. The archive wins (brief §36).
+        if (loc.month_status === 'closed') throw new UploadError(409, MONTH_CLOSED_MESSAGE);
 
         deliverableId = session.deliverableId;
         deliverableName = loc.deliverable_name;
@@ -307,10 +315,14 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
           .set({ isCurrent: false })
           .where(eq(deliverableVersions.deliverableId, deliverableId!));
 
+        // A version uploaded while a revision is open on the slot answers it.
+        revision = await openRevisionFor(tx, deliverableId!);
+
         await tx.insert(deliverableVersions).values({
           deliverableId: deliverableId!,
           versionNo: versionNo!,
           fileId: file.id,
+          revisionId: revision?.id ?? null,
           uploadedBy: actor.id,
           notes: session.notes,
           isCurrent: true,
@@ -334,6 +346,7 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
           UPDATE projects SET status = 'in_progress'
           WHERE id = ${projectId} AND status = 'planned'
         `);
+        if (revision) await syncRevisionStatus(tx, revision.id);
       } else {
         await tx.insert(attachments).values({
           fileId: file.id,
@@ -356,6 +369,7 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
         deliverableId,
         deliverableName,
         versionNo,
+        revisionNo: revision === null ? null : (revision as { revisionNo: number }).revisionNo,
         projectId,
       };
     });

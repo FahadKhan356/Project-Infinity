@@ -86,6 +86,12 @@ export default async function DeliveriesPage(props: PageProps<'/deliveries'>) {
                   {d.clientFeedback ? (
                     <p className="mt-2 whitespace-pre-wrap text-xs"><span className="text-muted">Client: </span>{d.clientFeedback}</p>
                   ) : null}
+                  {can(actor, 'revisions.create') && (d.status === 'delivered' || d.status === 'client_feedback_received') ? (
+                    <Link href={`/projects/${d.projectId}/revisions/new?deliverable=${d.deliverableId}`}
+                      className="mt-2 inline-block text-xs font-medium text-accent hover:underline">
+                      Open a revision on this file →
+                    </Link>
+                  ) : null}
                 </div>
                 <DeliveryForm
                   deliveryId={d.deliveryId}

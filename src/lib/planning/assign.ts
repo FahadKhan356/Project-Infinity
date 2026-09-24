@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import { assignments, departmentMembers, deliverables } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
 
 export class PlanningError extends Error {}
 
@@ -88,6 +89,7 @@ export async function createAssignment(
   if (team.project_status === 'cancelled' || team.project_status === 'completed') {
     throw new PlanningError('That project is closed.');
   }
+  await assertMonthOpen(db, { projectId: Number(team.project_id) }, (m) => new PlanningError(m));
 
   // The assignee must belong to the department doing the work. Otherwise a
   // designer could be handed video deliverables that their own QA panel would

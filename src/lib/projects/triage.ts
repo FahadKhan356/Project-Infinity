@@ -5,6 +5,7 @@ import { departmentMembers, projectDepartments, projects } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
+import { assertMonthOpen } from '@/lib/months/lifecycle';
 
 export class TriageError extends Error {}
 
@@ -48,6 +49,7 @@ export async function triageProject(actor: Actor, input: TriageInput): Promise<T
   if (!(await isProjectVisible(db, actor, input.projectId))) {
     throw new TriageError('No such project.');
   }
+  await assertMonthOpen(db, { projectId: input.projectId }, (m) => new TriageError(m));
   if (input.teams.length === 0) {
     throw new TriageError('A project needs at least one team.');
   }

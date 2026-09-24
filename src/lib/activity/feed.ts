@@ -21,6 +21,7 @@ const FEED_ACTIONS = [
   'project.created', 'project.triaged', 'project.notes_updated',
   'assignment.created', 'file.uploaded', 'file.deleted',
   'qa.reviewed', 'delivery.updated', 'comment.posted',
+  'revision.created', 'revision.assigned', 'revision.closed',
 ];
 
 /** Oldest first, so it reads like the example in the brief. */

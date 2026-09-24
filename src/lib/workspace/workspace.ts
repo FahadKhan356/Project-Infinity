@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { mayUploadTo } from '@/lib/files/access';
+import { isProjectMonthClosed } from '@/lib/months/lifecycle';
 
 /**
  * The shared project workspace (brief §9, §10).
@@ -53,6 +54,28 @@ export interface WorkspaceDeliverable {
   versions: WorkspaceVersion[];
   /** The most recent QA decision on any version — the feedback §26 sends back. */
   lastReview: WorkspaceReview | null;
+  /** The client revision this slot is currently being reworked for, if any (§15–17). */
+  openRevision: WorkspaceOpenRevision | null;
+}
+
+export interface WorkspaceOpenRevision {
+  id: number;
+  revisionNo: number;
+  title: string;
+  clientFeedback: string;
+  priority: string;
+  deadline: string | null;
+  status: string;
+}
+
+export interface WorkspaceRevision {
+  id: number;
+  revisionNo: number;
+  title: string;
+  status: string;
+  priority: string;
+  deadline: string | null;
+  deliverableNames: string[];
 }
 
 export interface WorkspaceAssignment {
@@ -101,9 +124,16 @@ export interface WorkspaceComment {
 
 export interface Workspace {
   projectId: number;
+  /**
+   * True when the project's month is archived (brief §36). Nothing here can
+   * be changed until it is reopened, so no button offers to.
+   */
+  monthClosed: boolean;
   teams: WorkspaceTeam[];
   /** Oldest first, so the thread reads top to bottom. */
   comments: WorkspaceComment[];
+  /** Every revision on the project, newest first (§9 "view project revisions"). */
+  revisions: WorkspaceRevision[];
 }
 
 /** ISO-8601 in UTC, so the browser can render it in the viewer's zone. */
@@ -114,8 +144,9 @@ const iso = (column: ReturnType<typeof sql.raw>) =>
 export async function loadWorkspace(actor: Actor, projectId: number): Promise<Workspace | null> {
   const db = getDb();
   if (!(await isProjectVisible(db, actor, projectId))) return null;
+  const monthClosed = await isProjectMonthClosed(db, projectId);
 
-  const [teamRows, assignmentRows, deliverableRows, versionRows, reviewRows, commentRows] = await Promise.all([
+  const [teamRows, assignmentRows, deliverableRows, versionRows, reviewRows, commentRows, revisionRows] = await Promise.all([
     db.execute<{
       id: number; department_id: number; department: string;
       team_lead_id: number | null; team_lead: string | null; planned: number;
@@ -210,7 +241,40 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
          OR a.project_id = ${projectId}
       ORDER BY c.created_at, c.id
     `),
+    db.execute<{
+      id: number; revision_no: number; title: string; status: string; priority: string;
+      deadline: string | null; client_feedback: string; deliverable_ids: number[]; deliverable_names: string[];
+    }>(sql`
+      SELECT r.id, r.revision_no, r.title, r.status, r.priority, r.client_feedback,
+             to_char(r.deadline, 'YYYY-MM-DD') AS deadline,
+             COALESCE((SELECT array_agg(rd.deliverable_id ORDER BY rd.deliverable_id)
+                         FROM revision_deliverables rd WHERE rd.revision_id = r.id), '{}') AS deliverable_ids,
+             COALESCE((SELECT array_agg(d.name ORDER BY d.project_department_id, d.sequence_no)
+                         FROM revision_deliverables rd JOIN deliverables d ON d.id = rd.deliverable_id
+                        WHERE rd.revision_id = r.id), '{}') AS deliverable_names
+      FROM revisions r
+      WHERE r.project_id = ${projectId}
+      ORDER BY r.revision_no DESC
+    `),
   ]);
+
+  // The revision a slot is being reworked for: the newest one touching it
+  // that is still open.
+  const openBySlot = new Map<number, WorkspaceOpenRevision>();
+  for (const r of [...revisionRows].reverse()) {
+    if (r.status === 'closed' || r.status === 'cancelled' || r.status === 'delivered') continue;
+    for (const slotId of r.deliverable_ids ?? []) {
+      openBySlot.set(Number(slotId), {
+        id: Number(r.id),
+        revisionNo: Number(r.revision_no),
+        title: r.title,
+        clientFeedback: r.client_feedback,
+        priority: r.priority,
+        deadline: r.deadline,
+        status: r.status,
+      });
+    }
+  }
 
   const versionsBySlot = new Map<number, WorkspaceVersion[]>();
   for (const v of versionRows) {
@@ -283,10 +347,11 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
           assignmentId: d.assignment_id === null ? null : Number(d.assignment_id),
           assigneeId,
           assignee: d.assignee,
-          canUpload: mayUploadTo(actor, { assigneeId, departmentId }),
+          canUpload: !monthClosed && mayUploadTo(actor, { assigneeId, departmentId }),
           currentVersion: versions[0] ?? null,
           versions,
           lastReview: reviewBySlot.get(Number(d.id)) ?? null,
+          openRevision: openBySlot.get(Number(d.id)) ?? null,
         };
       });
 
@@ -305,6 +370,7 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
 
   return {
     projectId,
+    monthClosed,
     teams,
     comments: commentRows.map((c) => ({
       id: Number(c.id),
@@ -314,6 +380,15 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
       createdAt: c.created_at,
       deliverableId: c.deliverable_id === null ? null : Number(c.deliverable_id),
       deliverableName: c.deliverable_name,
+    })),
+    revisions: revisionRows.map((r) => ({
+      id: Number(r.id),
+      revisionNo: Number(r.revision_no),
+      title: r.title,
+      status: r.status,
+      priority: r.priority,
+      deadline: r.deadline,
+      deliverableNames: r.deliverable_names ?? [],
     })),
   };
 }

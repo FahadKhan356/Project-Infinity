@@ -10,29 +10,34 @@ type Executor = Pick<ReturnType<typeof getDb>, 'execute'>;
  * 8). Only these are ever moved by the sync; `on_hold`, `cancelled` and the
  * pre-production states are set by people.
  */
-const FOLLOWS_WORK = new Set(['in_progress', 'qa', 'approved', 'ready_for_delivery', 'delivered']);
+const FOLLOWS_WORK = new Set([
+  'in_progress', 'qa', 'approved', 'ready_for_delivery', 'delivered', 'revision_required',
+]);
 
 /**
- * Derives a project's status from its slots and deliveries, and writes it if
- * it changed. Returns the status the project now has.
+ * Derives a project's status from its slots, deliveries and revisions, and
+ * writes it if it changed. Returns the status the project now has.
  *
- *   every slot delivered and every delivery completed → completed
- *   every slot delivered                              → delivered
- *   every slot approved or delivered                  → ready_for_delivery
- *   otherwise                                         → in_progress
+ *   a revision is open and not yet approved              → revision_required
+ *   every slot delivered and its latest delivery completed → completed
+ *   every slot delivered                                 → delivered
+ *   every slot approved or delivered                     → ready_for_delivery
+ *   otherwise                                            → in_progress
  */
 export async function syncProjectStatus(db: Executor, projectId: number): Promise<string | null> {
   const rows = await db.execute<{
-    status: string; total: number; done: number; delivered: number; completed: number;
+    status: string; total: number; done: number; delivered: number; completed: number; open_revisions: number;
   }>(sql`
     SELECT p.status,
            count(d.id)::int AS total,
            count(*) FILTER (WHERE d.status IN ('approved','delivered'))::int AS done,
            count(*) FILTER (WHERE d.status = 'delivered')::int AS delivered,
            count(*) FILTER (WHERE d.status = 'delivered'
-             AND EXISTS (SELECT 1 FROM deliveries dl WHERE dl.deliverable_id = d.id)
-             AND NOT EXISTS (SELECT 1 FROM deliveries dl
-                             WHERE dl.deliverable_id = d.id AND dl.status <> 'completed'))::int AS completed
+             AND (SELECT dl.status FROM deliveries dl WHERE dl.deliverable_id = d.id
+                  ORDER BY dl.id DESC LIMIT 1) = 'completed')::int AS completed,
+           (SELECT count(*)::int FROM revisions r
+             WHERE r.project_id = p.id
+               AND r.status IN ('new','assigned','in_progress','awaiting_qa')) AS open_revisions
     FROM projects p
     LEFT JOIN deliverables d ON d.project_id = p.id AND d.status <> 'cancelled'
     WHERE p.id = ${projectId}
@@ -45,7 +50,8 @@ export async function syncProjectStatus(db: Executor, projectId: number): Promis
   if (total === 0 || !FOLLOWS_WORK.has(row.status)) return row.status;
 
   let target: string;
-  if (Number(row.completed) === total) target = 'completed';
+  if (Number(row.open_revisions) > 0) target = 'revision_required';
+  else if (Number(row.completed) === total) target = 'completed';
   else if (Number(row.delivered) === total) target = 'delivered';
   else if (Number(row.done) === total) target = 'ready_for_delivery';
   else target = 'in_progress';

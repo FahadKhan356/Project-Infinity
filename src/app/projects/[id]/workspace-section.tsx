@@ -12,8 +12,9 @@ import { UploadButton } from './upload-button';
  * component serves every role — what differs is which upload buttons appear.
  */
 export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace: Workspace }) {
+  const readOnly = workspace.monthClosed;
   const mayPlan = (team: WorkspaceTeam) =>
-    team.teamLeadId === actor.id || can(actor, 'planning.viewAllDepartments');
+    !readOnly && (team.teamLeadId === actor.id || can(actor, 'planning.viewAllDepartments'));
 
   const allSlots = workspace.teams.flatMap((t) =>
     t.deliverables.map((d) => ({ id: d.id, label: `${t.department} — ${d.name}` })),
@@ -22,11 +23,36 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
   return (
     <>
       <section id="workspace" className="mt-8 scroll-mt-6">
-        <h2 className="text-sm font-semibold">Workspace</h2>
-        <p className="mt-1 max-w-prose text-xs text-muted">
-          Everyone assigned to this project sees the same workspace. Files stay attached to
-          their slot as numbered versions; a new upload never replaces an old one.
-        </p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold">Workspace</h2>
+            <p className="mt-1 max-w-prose text-xs text-muted">
+              Everyone assigned to this project sees the same workspace. Files stay attached to
+              their slot as numbered versions; a new upload never replaces an old one.
+            </p>
+          </div>
+          {!readOnly && can(actor, 'revisions.create') && allSlots.length > 0 ? (
+            <Link href={`/projects/${workspace.projectId}/revisions/new`}
+              className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-background">
+              Open a revision
+            </Link>
+          ) : null}
+        </div>
+
+        {workspace.revisions.length > 0 ? (
+          <ul className="mt-3 space-y-1.5">
+            {workspace.revisions.map((r) => (
+              <li key={r.id} className={`flex flex-wrap items-baseline gap-x-3 rounded-md border px-3 py-2 text-xs ${
+                r.status === 'closed' || r.status === 'cancelled' ? 'border-border text-muted' : 'border-accent/40 bg-accent/5'}`}>
+                <Link href={`/revisions/${r.id}`} className="font-medium hover:underline">
+                  Revision #{String(r.revisionNo).padStart(2, '0')} — {r.title}
+                </Link>
+                <span>{r.deliverableNames.join(', ')}</span>
+                <span className="ml-auto">{statusLabel(r.status)}{r.deadline ? ` · due ${r.deadline}` : ''}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
 
         {workspace.teams.length === 0 ? (
           <p className="mt-3 rounded-lg border border-border bg-surface px-4 py-6 text-sm text-muted">
@@ -57,7 +83,11 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
             ))}
           </ol>
         )}
-        <CommentForm projectId={workspace.projectId} deliverables={allSlots} />
+        {readOnly ? (
+          <p className="mt-3 text-xs text-muted">The thread is closed with the month.</p>
+        ) : (
+          <CommentForm projectId={workspace.projectId} deliverables={allSlots} />
+        )}
       </section>
     </>
   );
@@ -151,7 +181,16 @@ function SlotRow({ slot }: { slot: WorkspaceDeliverable }) {
         <span className={slot.status === 'changes_requested' ? 'text-red-600 dark:text-red-400' : ''}>
           {statusLabel(slot.status)}
         </span>
-        {slot.lastReview ? (
+        {slot.openRevision ? (
+          <div className="mt-1 max-w-xs rounded-md border border-accent/40 bg-accent/5 px-2 py-1 text-xs">
+            <Link href={`/revisions/${slot.openRevision.id}`} className="font-medium hover:underline">
+              Revision #{String(slot.openRevision.revisionNo).padStart(2, '0')}
+            </Link>
+            {slot.openRevision.deadline ? <span className="text-muted"> · due {slot.openRevision.deadline}</span> : null}
+            <p className="mt-0.5 whitespace-pre-wrap text-muted">{slot.openRevision.clientFeedback}</p>
+          </div>
+        ) : null}
+        {slot.lastReview && !(slot.openRevision && slot.status === 'changes_requested' && slot.lastReview.decision === 'approved') ? (
           <div className="mt-1 max-w-xs text-xs text-muted">
             <span className="font-medium text-foreground">{slot.lastReview.reviewer}</span>
             {' '}
