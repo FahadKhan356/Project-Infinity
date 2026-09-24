@@ -32,8 +32,8 @@ uploads and permission-gated downloads; and one `Client → Month → Project`
 record that all of it hangs off.
 
 Phase 1b has begun: **revisions**, the **monthly archive** — close, reopen,
-copy forward, month summaries — **global search** and **notifications**
-are in (below). Per-role dashboards remain.
+copy forward, month summaries — **global search**, **notifications** and
+**per-role dashboards** are in (below). Phase 1b is complete.
 
 ### Clients, months and intake
 
@@ -245,6 +245,24 @@ and their lead — so nothing goes stale and there is no job to run.
 
 The inbox is at `/notifications`, with an unread badge in the header.
 Opening a notification marks it read and lands on what it is about.
+
+### Dashboards
+
+`/dashboard` is one page whose tiles and tables depend on the role (brief
+§21), and every number on it is the same scoped query as every list — a
+Team Lead's counts are counts over the projects they can open. Management
+sees active, completed, in production, in QA, awaiting delivery, in
+revision, delayed and on hold, plus the value of active projects and of
+this month's orders, a by-department table (active projects, open slots,
+in QA, approved, QA rounds and how many were sent back) and per-person
+workload. The Project Manager adds intake and their own QA queue; Sales
+gets what is waiting for the PM, what is ready to deliver and their
+clients' value; a Team Lead sees their team only — projects routed to them
+but not yet planned, their QA queue, revisions touching their team, their
+members' workload; an Executive sees assignments, slots pending / in QA /
+to redo / completed, revisions on their work. Everyone gets the deadlines
+of the next seven days. Pricing tiles exist only for roles that may see
+pricing.
 
 ### Activity
 

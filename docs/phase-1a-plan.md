@@ -172,7 +172,12 @@ differently.
 - **Notifications (§20) — DONE.** `lib/notifications`: events emitted inside
   each mutation's transaction, the inbox with mark-read, live deadline
   reminders. Covered by `tests/notifications.test.ts`.
-- Per-role dashboards (§21) — next, the last Phase 1b item.
+- **Per-role dashboards (§21) — DONE.** `lib/dashboard`, one scoped loader,
+  one page shaped by role. Covered by `tests/dashboard.test.ts`.
+
+Phase 1b is complete. What remains for Phase 1 is confirmation of the open
+questions below and the deployment work in docs/runbook.md on the real
+server.
 
 ## Open questions — blocking
 

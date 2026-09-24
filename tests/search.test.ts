@@ -248,8 +248,10 @@ describe('permissions apply to search results (brief §22)', { skip }, () => {
     // The revision is about the thumbnail: the Design lead sees it, the
     // Video lead — on the same project — does not, and cannot find the
     // project through it.
-    assert.deepEqual(titles(await search.searchProjects(leadDesign(), { q: 'Logo placement' })), ['Autumn launch film']);
-    assert.deepEqual(await search.searchProjects(leadVideo(), { q: 'Logo placement' }), []);
+    // Pinned to the client: a lead's scope is department-wide, and other
+    // suites' revisions in the shared database may use the same words.
+    assert.deepEqual(titles(await search.searchProjects(leadDesign(), { q: 'Logo placement', clientId: ids.client })), ['Autumn launch film']);
+    assert.deepEqual(await search.searchProjects(leadVideo(), { q: 'Logo placement', clientId: ids.client }), []);
   });
 
   test('a deactivated account finds nothing', async () => {

@@ -19,11 +19,11 @@ export async function AppShell({ actor, children }: { actor: Actor; children: Re
     <div className="flex min-h-svh flex-col">
       <header className="border-b border-border bg-surface">
         <div className="mx-auto flex max-w-5xl items-center gap-6 px-6 py-3">
-          <Link href="/dashboard" className="text-sm font-semibold tracking-tight">
+          <Link href="/dashboard" className="shrink-0 whitespace-nowrap text-sm font-semibold tracking-tight">
             Aktivacity Portal
           </Link>
 
-          <nav className="flex items-center gap-4 text-sm">
+          <nav className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
             <Link href="/dashboard" className="text-muted hover:text-foreground">
               Dashboard
             </Link>
@@ -68,7 +68,7 @@ export async function AppShell({ actor, children }: { actor: Actor; children: Re
             ) : null}
           </nav>
 
-          <div className="ml-auto flex items-center gap-3 text-sm">
+          <div className="ml-auto flex shrink-0 items-center gap-3 whitespace-nowrap text-sm">
             <Link href="/notifications" className="text-muted hover:text-foreground" aria-label={`Inbox, ${unread} unread`}>
               Inbox
               {unread > 0 ? (
@@ -79,9 +79,9 @@ export async function AppShell({ actor, children }: { actor: Actor; children: Re
             </Link>
             <form action="/search" method="get" role="search">
               <input name="q" type="search" placeholder="Search…" aria-label="Search projects"
-                className="w-40 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus:border-accent" />
+                className="w-28 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus:border-accent lg:w-40" />
             </form>
-            <span className="text-muted">
+            <span className="hidden text-muted md:inline">
               {actor.fullName} · {ROLE_LABELS[actor.role]}
             </span>
             <form action="/logout" method="post">
