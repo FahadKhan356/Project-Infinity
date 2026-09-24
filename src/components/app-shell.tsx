@@ -67,6 +67,10 @@ export function AppShell({ actor, children }: { actor: Actor; children: React.Re
           </nav>
 
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <form action="/search" method="get" role="search">
+              <input name="q" type="search" placeholder="Search…" aria-label="Search projects"
+                className="w-40 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus:border-accent" />
+            </form>
             <span className="text-muted">
               {actor.fullName} · {ROLE_LABELS[actor.role]}
             </span>

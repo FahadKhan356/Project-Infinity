@@ -31,9 +31,9 @@ permission grants; a policy layer that every list query composes; resumable
 uploads and permission-gated downloads; and one `Client → Month → Project`
 record that all of it hangs off.
 
-Phase 1b has begun: **revisions** and the **monthly archive** — close,
-reopen, copy forward, month summaries — are in (below). Search,
-notifications and dashboards remain.
+Phase 1b has begun: **revisions**, the **monthly archive** — close, reopen,
+copy forward, month summaries — and **global search** are in (below).
+Notifications and dashboards remain.
 
 ### Clients, months and intake
 
@@ -213,6 +213,19 @@ closes:
   projects, delivered/total deliverables, what is in QA, in revision or
   pending, and the teams involved — scoped, so an Executive's numbers cover
   only the projects they can open.
+
+### Search
+
+`/search` (and the box in the header) finds projects by every field brief
+§22 lists — name, code, client or company, team, team lead, executive,
+deliverable name, file name, revision title or the client's words — and
+filters by status, team, client, team lead, executive, delivery status,
+month, deadline range and "has an open revision". Each hit says which field
+matched. It is one query composed with `projectScope`, so the brief's
+acceptance case holds by construction: an Executive searching a colleague's
+name finds nothing they could not already open. Revision text is further
+gated by `revisionScope`, and the people filters are offered only to roles
+that see across teams. Searches are plain GET URLs, so they can be shared.
 
 ### Activity
 

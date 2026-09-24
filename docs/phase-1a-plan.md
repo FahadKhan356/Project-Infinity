@@ -166,7 +166,10 @@ differently.
   `assertMonthOpen` guard called by every mutation module, copy-previous-month
   as one transaction with `copied_from_project_id` lineage, and per-month
   summaries on the client page. Covered by `tests/months.test.ts`.
-- Global search + filters, notifications, per-role dashboards — next.
+- **Global search + filters (§22) — DONE.** `lib/search`, `/search`, header
+  search box. Covered by `tests/search.test.ts`, including the brief's own
+  acceptance example.
+- Notifications, per-role dashboards — next.
 
 ## Open questions — blocking
 
