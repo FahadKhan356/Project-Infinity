@@ -1,6 +1,7 @@
 /**
  * The file layer end to end: resumable upload, interruption and resume,
- * checksum, versioning, and who may read the bytes afterwards.
+ * checksum, versioning, who may read the bytes afterwards, and who may
+ * delete them.
  *
  * Runs against a real PostgreSQL and a real filesystem, because the things
  * worth proving here — atomic promotion, positional chunk writes, project-
@@ -11,9 +12,18 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
+// First of the Next imports, as in Next's own server: it provides the
+// AsyncLocalStorage that request scopes (cookies(), headers()) live in.
+import 'next/dist/server/node-environment-baseline';
+import { NextRequest } from 'next/server';
+import { workAsyncStorage } from 'next/dist/server/app-render/work-async-storage.external';
+import { workUnitAsyncStorage } from 'next/dist/server/app-render/work-unit-async-storage.external';
+import { createRequestStoreForAPI } from 'next/dist/server/async-storage/request-store';
+import { createWorkStore } from 'next/dist/server/async-storage/work-store';
 import postgres from 'postgres';
 import type { Actor, Permission, Role } from '../src/lib/authz/types';
 
@@ -28,6 +38,8 @@ let storageRoot: string;
 let uploads: typeof import('../src/lib/files/uploads');
 let access: typeof import('../src/lib/files/access');
 let storage: typeof import('../src/lib/files/storage');
+let attachments: typeof import('../src/lib/files/attachments');
+let route: typeof import('../src/app/api/files/[storageKey]/route');
 
 const ids: Record<string, number> = {};
 let payload: Buffer;
@@ -75,6 +87,17 @@ async function setUp() {
   uploads = await import('../src/lib/files/uploads');
   access = await import('../src/lib/files/access');
   storage = await import('../src/lib/files/storage');
+  attachments = await import('../src/lib/files/attachments');
+
+  // Next compiles route handlers for its server layer, where
+  // `next/navigation` is the react-server build (see next's
+  // build/create-compiler-aliases.js). Plain Node has no such alias, so the
+  // same substitution is made here before the route loads.
+  const load = createRequire(__filename);
+  const serverNavigation = load.resolve('next/dist/client/components/navigation.react-server');
+  load(serverNavigation);
+  load.cache[load.resolve('next/navigation')] = load.cache[serverNavigation];
+  route = await import('../src/app/api/files/[storageKey]/route');
 
   sql = postgres(DATABASE_URL!, { max: 1, onnotice: () => {} });
   // Clear anything a previous interrupted run left behind, so the suite is
@@ -166,6 +189,48 @@ after(async () => {
   await sql.end();
   await rm(storageRoot, { recursive: true, force: true });
 });
+
+/**
+ * /api/files/:storageKey as `userId`, run the way Next runs it: inside a
+ * request scope whose cookie is a real session, so the actor is resolved by
+ * the data access layer exactly as in production. The scope is built with
+ * Next's own store factories (next 16.3).
+ */
+async function requestAs(
+  userId: number,
+  storageKey: string,
+  { method, query = '', headers = {} }: { method: 'GET' | 'DELETE'; query?: string; headers?: Record<string, string> },
+): Promise<Response> {
+  const [session] = await sql<{ id: string }[]>`
+    INSERT INTO sessions (user_id, expires_at) VALUES (${userId}, now() + interval '1 hour')
+    RETURNING id::text AS id`;
+  const request = new NextRequest(`http://portal.test/api/files/${storageKey}${query}`, {
+    method,
+    headers: { cookie: `aktivacity_session=${session.id}`, ...headers },
+  });
+  const requestStore = createRequestStoreForAPI(
+    request, request.nextUrl, undefined as never, undefined, undefined as never, undefined,
+  );
+  const workStore = createWorkStore({
+    page: '/api/files/[storageKey]/route',
+    renderOpts: { experimental: {}, supportsDynamicResponse: true } as never,
+    buildId: 'test',
+    deploymentId: 'test',
+    previouslyRevalidatedTags: [],
+  });
+  const ctx = { params: Promise.resolve({ storageKey }) };
+  try {
+    return await workUnitAsyncStorage.run(requestStore, () =>
+      workAsyncStorage.run(workStore, () =>
+        method === 'DELETE' ? route.DELETE(request, ctx) : route.GET(request, ctx)));
+  } finally {
+    await sql`DELETE FROM sessions WHERE id = ${session.id}::uuid`;
+  }
+}
+
+const deleteAs = (userId: number, storageKey: string) => requestAs(userId, storageKey, { method: 'DELETE' });
+const getAs = (userId: number, storageKey: string, opts: { query?: string; headers?: Record<string, string> } = {}) =>
+  requestAs(userId, storageKey, { method: 'GET', ...opts });
 
 describe('resumable upload', { skip }, () => {
   test('survives a dropped connection and resumes from the recorded offset', async () => {
@@ -344,6 +409,57 @@ describe('who may upload', { skip }, () => {
   });
 });
 
+describe('a slot past QA does not take new versions (brief §12, §14, §19)', { skip }, () => {
+  const ahmed = () => actor('executive', { id: ids.ahmed });
+  const setSlot = (status: string) => sql`UPDATE deliverables SET status = ${status}::deliverable_status WHERE id = ${ids.deliverable}`;
+
+  after(async () => { if (!skip) await setSlot('awaiting_lead_qa'); });
+
+  test('while the Project Manager is reviewing, an upload would erase the lead’s sign-off', async () => {
+    await setSlot('awaiting_pm_qa');
+    const decision = await access.canUploadToDeliverable(ahmed(), ids.deliverable);
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason ?? '', /Project Manager/);
+  });
+
+  test('an approved deliverable needs a revision before it can be replaced', async () => {
+    await setSlot('approved');
+    const decision = await access.canUploadToDeliverable(ahmed(), ids.deliverable);
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason ?? '', /revision/i);
+  });
+
+  test('so does a delivered one', async () => {
+    await setSlot('delivered');
+    assert.equal((await access.canUploadToDeliverable(ahmed(), ids.deliverable)).allowed, false);
+  });
+
+  test('a slot sent back for changes takes the next version', async () => {
+    await setSlot('changes_requested');
+    assert.equal((await access.canUploadToDeliverable(ahmed(), ids.deliverable)).allowed, true);
+  });
+
+  test('an upload in flight is refused at completion if the slot was approved meanwhile', async () => {
+    await setSlot('changes_requested');
+    const bytes = randomBytes(1024);
+    const { session } = await uploads.createUploadSession(ahmed(), {
+      target: 'deliverable', deliverableId: ids.deliverable, filename: 'late.mp4', size: bytes.length,
+    });
+    await uploads.appendChunk(ahmed(), session.id, 0, streamOf(bytes));
+    await setSlot('approved');
+    await assert.rejects(uploads.completeUpload(ahmed(), session.id), /revision/i);
+  });
+
+  test('the pure rule the workspace button uses agrees', () => {
+    assert.equal(access.uploadBlockedReason('pending'), null);
+    assert.equal(access.uploadBlockedReason('awaiting_lead_qa'), null);
+    assert.notEqual(access.uploadBlockedReason('awaiting_pm_qa'), null);
+    assert.notEqual(access.uploadBlockedReason('approved'), null);
+    assert.notEqual(access.uploadBlockedReason('delivered'), null);
+    assert.notEqual(access.uploadBlockedReason('cancelled'), null);
+  });
+});
+
 describe('who may download (brief §10, §43)', { skip }, () => {
   test('the uploader can read their own file', async () => {
     const ahmed = actor('executive', { id: ids.ahmed });
@@ -388,6 +504,348 @@ describe('who may download (brief §10, §43)', { skip }, () => {
       assert.deepEqual(await access.decideFileAccess(admin, file), { allowed: true });
     } finally {
       await sql`UPDATE files SET deleted_at = NULL, deleted_by = NULL WHERE id = ${ids.fileV1}`;
+    }
+  });
+});
+
+describe('deleting a file (brief §36, §43)', { skip }, () => {
+  before(async () => {
+    if (skip) return;
+    // The lead holds neither files.delete by role nor month.reopen: the
+    // per-user grant is what lets them delete at all. Ahmed's row is one an
+    // Executive cannot hold (brief §23), and must count for nothing.
+    await sql`
+      INSERT INTO user_permissions (user_id, permission, granted_by)
+      VALUES (${ids.leadVideo}, 'delete_files', ${ids.pm}), (${ids.ahmed}, 'delete_files', ${ids.pm})`;
+    // A session actor leads what department_members says, not what the
+    // project row names; the fixture above only set the latter.
+    await sql`
+      INSERT INTO department_members (user_id, department_id, is_lead)
+      VALUES (${ids.leadVideo}, ${ids.video}, true) ON CONFLICT DO NOTHING`;
+    // Past the first-login password change, which the API would otherwise demand.
+    await sql`UPDATE users SET must_change_password = false WHERE id IN (${ids.leadVideo}, ${ids.ahmed})`;
+  });
+
+  after(async () => {
+    if (skip || !sql) return;
+    await sql`DELETE FROM user_permissions WHERE user_id IN (${ids.leadVideo}, ${ids.ahmed})`;
+    await sql`DELETE FROM department_members WHERE user_id = ${ids.leadVideo}`;
+  });
+
+  const isDeleted = async (fileId: number) =>
+    (await sql`SELECT deleted_at IS NOT NULL AS deleted FROM files WHERE id = ${fileId}`)[0].deleted;
+
+  test('a closed month refuses it, even to someone allowed to delete files', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    await sql`
+      UPDATE client_months SET status = 'closed', closed_at = now(), closed_by = ${ids.pm}
+      WHERE id = ${ids.month}`;
+    try {
+      const response = await deleteAs(ids.leadVideo, storageKey);
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).error, /month is closed/);
+      assert.equal(await isDeleted(ids.fileV1), false, 'the archive is unchanged');
+      // Logged like every other refused delete.
+      const [denied] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM activity_log
+        WHERE actor_id = ${ids.leadVideo} AND action = 'file.delete_denied' AND entity_id = ${ids.fileV1}
+          AND metadata->>'reason' = 'month_closed'`;
+      assert.equal(denied.n, 1);
+    } finally {
+      await sql`
+        UPDATE client_months SET status = 'open', closed_at = NULL, closed_by = NULL
+        WHERE id = ${ids.month}`;
+    }
+  });
+
+  test('a grant an Executive cannot hold counts for nothing (brief §23)', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    const response = await deleteAs(ids.ahmed, storageKey);
+    assert.equal(response.status, 403);
+    assert.equal(await isDeleted(ids.fileV1), false);
+  });
+
+  test('in an open month, on a visible project, it is a soft delete', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    try {
+      const response = await deleteAs(ids.leadVideo, storageKey);
+      assert.equal(response.status, 204);
+      assert.equal(await isDeleted(ids.fileV1), true);
+    } finally {
+      await sql`UPDATE files SET deleted_at = NULL, deleted_by = NULL WHERE id = ${ids.fileV1}`;
+    }
+  });
+
+  test('deleting it again keeps the record of who deleted it, and when', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    const [first] = await sql<{ at: string }[]>`
+      UPDATE files SET deleted_at = now() - interval '1 day', deleted_by = ${ids.pm}
+      WHERE id = ${ids.fileV1} RETURNING deleted_at::text AS at`;
+    try {
+      const response = await deleteAs(ids.leadVideo, storageKey);
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).error, /already been deleted/);
+      const [row] = await sql<{ by: number; at: string }[]>`
+        SELECT deleted_by::int AS by, deleted_at::text AS at FROM files WHERE id = ${ids.fileV1}`;
+      assert.deepEqual(row, { by: ids.pm, at: first.at });
+    } finally {
+      await sql`UPDATE files SET deleted_at = NULL, deleted_by = NULL WHERE id = ${ids.fileV1}`;
+    }
+  });
+});
+
+/**
+ * Downloading is a right of its own (brief §43): the portal decides who may
+ * keep a copy of a file separately from who may see it. A `no_download` row
+ * withholds it from one account; viewing in place is untouched, and the
+ * restriction is decided after visibility, so it reveals nothing about
+ * files the account cannot see.
+ */
+describe('downloading is a right of its own (brief §43)', { skip }, () => {
+  const sara = () => actor('executive', {
+    id: ids.sara, departmentIds: [ids.design], permissions: new Set<Permission>(['no_download']),
+  });
+  let zipKey: string;
+
+  before(async () => {
+    if (skip) return;
+    // Past the first-login password change, which the API would otherwise
+    // refuse with a 403 of its own — the very status asserted below.
+    await sql`UPDATE users SET must_change_password = false WHERE id IN (${ids.sara}, ${ids.ahmed})`;
+    await sql`
+      INSERT INTO user_permissions (user_id, permission, granted_by)
+      VALUES (${ids.sara}, 'no_download', ${ids.pm})`;
+    // Something with nothing to show inline: an archive on Sara's own slot.
+    const bytes = randomBytes(256);
+    const { session } = await uploads.createUploadSession(sara(), {
+      target: 'deliverable', deliverableId: ids.designDeliverable,
+      filename: 'thumbs.zip', size: bytes.length, mimeType: 'application/zip',
+    });
+    await uploads.appendChunk(sara(), session.id, 0, streamOf(bytes));
+    const result = await uploads.completeUpload(sara(), session.id);
+    ids.zipFile = result.fileId;
+    zipKey = (await fileContextFor(result.fileId)).storageKey;
+  });
+
+  after(async () => {
+    if (skip || !sql) return;
+    await sql`DELETE FROM user_permissions WHERE user_id = ${ids.sara}`;
+  });
+
+  test('the rule: viewing stays, keeping a copy is withheld', async () => {
+    const file = await fileContextFor(ids.fileV1);
+    assert.deepEqual(await access.decideFileAccess(sara(), file, 'read'), { allowed: true });
+    assert.deepEqual(await access.decideFileAccess(sara(), file), { allowed: true });
+    assert.deepEqual(
+      await access.decideFileAccess(sara(), file, 'download'),
+      { allowed: false, reason: 'download_withheld' },
+    );
+  });
+
+  test('decided last: a restricted user learns nothing about files they cannot see', async () => {
+    const omar = actor('executive', { id: ids.omar, permissions: new Set<Permission>(['no_download']) });
+    const file = await fileContextFor(ids.fileV1);
+    assert.deepEqual(
+      await access.decideFileAccess(omar, file, 'download'),
+      { allowed: false, reason: 'out_of_scope' },
+    );
+  });
+
+  test('GET without ?inline=1 is refused with 403, and the refusal is on the record', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    const response = await getAs(ids.sara, storageKey);
+    assert.equal(response.status, 403);
+    const body = await response.json();
+    assert.match(body.error, /download/i);
+    assert.doesNotMatch(body.error, /password/i, 'refused for the right reason');
+    const [denied] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM activity_log
+      WHERE actor_id = ${ids.sara} AND action = 'file.download_denied' AND entity_id = ${ids.fileV1}
+        AND metadata->>'reason' = 'download_withheld'`;
+    assert.equal(denied.n, 1);
+    const [served] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM activity_log
+      WHERE actor_id = ${ids.sara} AND action = 'file.downloaded' AND entity_id = ${ids.fileV1}`;
+    assert.equal(served.n, 0, 'nothing left the server');
+  });
+
+  test('inline viewing and scrubbing previews keep working', async () => {
+    const { storageKey } = await fileContextFor(ids.fileV1);
+    const response = await getAs(ids.sara, storageKey, { query: '?inline=1' });
+    assert.equal(response.status, 200);
+    assert.ok((response.headers.get('content-disposition') ?? '').startsWith('inline;'));
+    assert.equal(response.headers.get('content-type'), 'video/mp4');
+    await response.arrayBuffer();
+    const rows = await sql<{ inline: boolean }[]>`
+      SELECT (metadata->>'inline')::boolean AS inline FROM activity_log
+      WHERE actor_id = ${ids.sara} AND action = 'file.downloaded' AND entity_id = ${ids.fileV1}`;
+    assert.deepEqual(rows.map((r) => r.inline), [true]);
+
+    const partial = await getAs(ids.sara, storageKey, { query: '?inline=1', headers: { range: 'bytes=0-9' } });
+    assert.equal(partial.status, 206);
+    await partial.arrayBuffer();
+  });
+
+  test('a file with nothing to show inline is a download even with ?inline=1; colleagues are unaffected', async () => {
+    const refused = await getAs(ids.sara, zipKey, { query: '?inline=1' });
+    assert.equal(refused.status, 403);
+    assert.match((await refused.json()).error, /download/i);
+
+    const served = await getAs(ids.ahmed, zipKey);
+    assert.equal(served.status, 200);
+    assert.ok((served.headers.get('content-disposition') ?? '').startsWith('attachment;'));
+    await served.arrayBuffer();
+  });
+});
+
+/**
+ * The purchase order is a document of its own (brief §3 "PO / project
+ * requirements"): filed by Sales or the PM as kind 'po', always on the
+ * project itself, and shown beside the PO reference rather than among the
+ * references. Reading it follows the same project rule as every file.
+ */
+describe('the PO document (brief §3)', { skip }, () => {
+  const pm = () => actor('project_manager', { id: ids.pm });
+
+  async function attach(
+    who: Actor, projectId: number, filename: string,
+    parent: { assignmentId?: number; revisionId?: number; kind?: 'po' | 'reference' } = {},
+  ) {
+    const bytes = randomBytes(96);
+    const { session } = await uploads.createUploadSession(who, {
+      target: 'attachment', projectId, ...parent, filename, size: bytes.length,
+    });
+    await uploads.appendChunk(who, session.id, 0, streamOf(bytes));
+    return { result: await uploads.completeUpload(who, session.id), sessionId: session.id };
+  }
+
+  test('Sales or the PM file the PO as its own kind, and it is listed as the PO', async () => {
+    const { result, sessionId } = await attach(pm(), ids.project, 'PO-4411.pdf', { kind: 'po' });
+    assert.equal(result.kind, 'po');
+    ids.poFile = result.fileId;
+
+    const [row] = await sql`
+      SELECT kind, purpose, project_id::int AS project_id, assignment_id::int AS assignment_id
+      FROM attachments WHERE file_id = ${result.fileId}`;
+    assert.deepEqual([row.kind, row.purpose, row.project_id, row.assignment_id], ['po', 'po', ids.project, null]);
+
+    const listed = (await attachments.listProjectAttachments(pm(), ids.project))
+      .find((a) => a.originalFilename === 'PO-4411.pdf');
+    assert.equal(listed?.kind, 'po');
+    assert.deepEqual(listed?.parent, { kind: 'project' });
+
+    // The session is the pending attachment: it carries the kind to completion.
+    const [session] = await sql`SELECT kind FROM upload_sessions WHERE id = ${sessionId}::uuid`;
+    assert.equal(session.kind, 'po');
+  });
+
+  test('the PO is served under the project rule like any attachment (access rules unchanged)', async () => {
+    const file = await fileContextFor(ids.poFile);
+    assert.equal(file.projectId, ids.project);
+    assert.equal(file.versionNo, null);
+    assert.equal(file.projectCode, 'M2T-0001');
+
+    const sara = actor('executive', { id: ids.sara });
+    assert.deepEqual(await access.decideFileAccess(sara, file), { allowed: true });
+    const omar = actor('executive', { id: ids.omar });
+    assert.deepEqual(await access.decideFileAccess(omar, file), { allowed: false, reason: 'out_of_scope' });
+  });
+
+  test('an executive cannot file the PO, and a PO cannot hang off an assignment or revision', async () => {
+    const ahmed = actor('executive', { id: ids.ahmed, departmentIds: [ids.video] });
+    const refused = await access.canAttachToProject(ahmed, ids.project, { kind: 'po' });
+    assert.equal(refused.allowed, false);
+    assert.match(refused.reason ?? '', /Sales or the Project Manager/);
+
+    const misplaced = await access.canAttachToProject(pm(), ids.project, { assignmentId: ids.asgVideo, kind: 'po' });
+    assert.equal(misplaced.allowed, false);
+    assert.match(misplaced.reason ?? '', /belongs to the project/);
+
+    // The database holds the line too, whatever code path writes the row.
+    await assert.rejects(
+      sql`INSERT INTO attachments (file_id, assignment_id, kind) VALUES (${ids.fileV1}, ${ids.asgVideo}, 'po')`,
+      /attachments_po_on_project|check constraint/i,
+    );
+  });
+
+  test('an attachment without a kind is a plain reference', async () => {
+    const { result } = await attach(pm(), ids.project, 'brand-guide.pdf');
+    assert.equal(result.kind, 'reference');
+    const [row] = await sql`SELECT kind, purpose FROM attachments WHERE file_id = ${result.fileId}`;
+    assert.deepEqual([row.kind, row.purpose], ['reference', 'reference']);
+    const listed = (await attachments.listProjectAttachments(pm(), ids.project))
+      .find((a) => a.originalFilename === 'brand-guide.pdf');
+    assert.equal(listed?.kind, 'reference');
+  });
+});
+
+/**
+ * A row whose bytes are gone. The handler used to build the Response around
+ * a stream that had not opened the file yet, so the ENOENT fired after the
+ * status was already committed: Next logged "failed to pipe response", the
+ * client got no HTTP status at all (browser: network error; curl: exit 52),
+ * and the activity log claimed a download that never happened.
+ */
+describe('a row whose bytes are gone', { skip }, () => {
+  const ahmed = () => actor('executive', { id: ids.ahmed, departmentIds: [ids.video] });
+  let storageKey: string;
+  let fileId: number;
+  let storagePath: string;
+
+  const served = async () => (await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM activity_log
+    WHERE actor_id = ${ids.ahmed} AND action = 'file.downloaded' AND entity_id = ${fileId}`)[0].n;
+  const denied = async (reason: string) => (await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM activity_log
+    WHERE actor_id = ${ids.ahmed} AND action = 'file.download_denied' AND entity_id = ${fileId}
+      AND metadata->>'reason' = ${reason}`)[0].n;
+
+  before(async () => {
+    if (skip) return;
+    // Past the first-login password change, which the API would otherwise refuse.
+    await sql`UPDATE users SET must_change_password = false WHERE id = ${ids.ahmed}`;
+    // Something previewable, so ?inline=1 really takes the inline path.
+    const bytes = randomBytes(64);
+    const { session } = await uploads.createUploadSession(ahmed(), {
+      target: 'attachment', projectId: ids.project,
+      filename: 'frame.png', size: bytes.length, mimeType: 'image/png',
+    });
+    await uploads.appendChunk(ahmed(), session.id, 0, streamOf(bytes));
+    const result = await uploads.completeUpload(ahmed(), session.id);
+    fileId = result.fileId;
+    storagePath = result.storagePath;
+    storageKey = (await fileContextFor(fileId)).storageKey;
+    // The row stays; the bytes go — a disk restored from an older backup.
+    await rm(storage.absolutePath(storagePath));
+  });
+
+  test('a download answers 404 with a body, and nothing is recorded as served', async () => {
+    const response = await getAs(ids.ahmed, storageKey);
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: 'Not found.' });
+    assert.equal(await served(), 0, 'nothing left the server');
+    assert.equal(await denied('missing_on_disk'), 1, 'the refusal is on the record');
+  });
+
+  test('so does viewing it inline', async () => {
+    const response = await getAs(ids.ahmed, storageKey, { query: '?inline=1' });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: 'Not found.' });
+    assert.equal(await served(), 0, 'nothing left the server');
+    assert.equal(await denied('missing_on_disk'), 2);
+  });
+
+  test('bytes the retention sweep removed are gone for good: 410', async () => {
+    // The sweep leaves the row with an empty path (scripts/sweep-files.ts).
+    await sql`UPDATE files SET storage_path = '' WHERE id = ${fileId}`;
+    try {
+      const response = await getAs(ids.ahmed, storageKey);
+      assert.equal(response.status, 410);
+      assert.match((await response.json()).error, /retention sweep/);
+      assert.equal(await served(), 0, 'nothing left the server');
+      assert.equal(await denied('purged'), 1);
+    } finally {
+      await sql`UPDATE files SET storage_path = ${storagePath} WHERE id = ${fileId}`;
     }
   });
 });

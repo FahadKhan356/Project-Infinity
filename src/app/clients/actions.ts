@@ -4,12 +4,16 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { clientContacts, clientServices, clients } from '@/db/schema';
+import { clientServices } from '@/db/schema';
 import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
-import { assertCan, can } from '@/lib/authz';
+import { assertCan } from '@/lib/authz';
+import {
+  ClientProfileError, createClientRecord, removeContact, saveContact, updateClientProfile,
+  type ClientStatus, type ContactInput,
+} from '@/lib/clients/profile';
 import { copyMonth, parseCopyForm } from '@/lib/months/copy';
-import { MonthError, closeMonth, reopenMonth } from '@/lib/months/lifecycle';
+import { MonthError, closeMonth, openMonth, reopenMonth } from '@/lib/months/lifecycle';
 import { IntakeError } from '@/lib/projects/file-project';
 import { formatMonth } from '@/lib/projects/intake';
 import { isClientVisible } from '@/lib/projects/queries';
@@ -20,91 +24,163 @@ export interface ClientFormState {
   clientId?: number;
 }
 
-const DUPLICATE_NAME = '23505';
-
 export async function createClient(
   _prev: ClientFormState,
   formData: FormData,
 ): Promise<ClientFormState> {
   const actor = await requireActor();
-  assertCan(actor, 'clients.manage');
+  const text = (key: string) => String(formData.get(key) ?? '').trim() || null;
 
-  const name = String(formData.get('name') ?? '').trim();
-  const companyName = String(formData.get('companyName') ?? '').trim() || null;
-  const clientType = formData.get('clientType') === 'one_off' ? 'one_off' : 'retainer';
-  const notes = String(formData.get('notes') ?? '').trim() || null;
-
-  if (name.length < 2) return { error: 'Enter the client’s name.' };
-
+  // §31 "date client started": defaults to the day the record is made; a
+  // prospect has not started, so it is set when they become a client.
+  let created;
   try {
-    const [created] = await getDb()
-      .insert(clients)
-      .values({
-        name,
-        companyName,
-        clientType,
-        notes,
-        // The rep who books the client owns it, which is what scopes their
-        // visibility later (brief §23, §31).
-        ownerUserId: actor.role === 'sales' ? actor.id : null,
-        createdBy: actor.id,
-      })
-      .returning({ id: clients.id });
-
-    await recordActivity({
-      actorId: actor.id,
-      action: 'client.created',
-      entityType: 'client',
-      entityId: created.id,
-      clientId: created.id,
-      metadata: { name },
+    created = await createClientRecord(actor, {
+      name: String(formData.get('name') ?? ''),
+      companyName: text('companyName'),
+      clientType: formData.get('clientType') === 'one_off' ? 'one_off' : 'retainer',
+      status: formData.get('prospect') === 'on' ? 'prospect' : 'active',
+      notes: text('notes'),
+      startedOn: text('startedOn'),
     });
-
-    revalidatePath('/clients');
-    return { notice: `Created ${name}.`, clientId: created.id };
   } catch (error) {
-    if ((error as { code?: string }).code === DUPLICATE_NAME) {
-      // The unique index on lower(name) is what keeps "ABC Company" and
-      // "abc company" from becoming two histories (brief §31).
-      return { error: `A client called “${name}” already exists. Open that record instead.` };
-    }
+    if (error instanceof ClientProfileError) return { error: error.message };
     throw error;
   }
+
+  await recordActivity({
+    actorId: actor.id,
+    action: 'client.created',
+    entityType: 'client',
+    entityId: created.clientId,
+    clientId: created.clientId,
+    metadata: { name: created.name },
+  });
+
+  revalidatePath('/clients');
+  return { notice: `Created ${created.name}.`, clientId: created.clientId };
 }
 
+function contactFrom(formData: FormData): ContactInput {
+  const text = (key: string) => String(formData.get(key) ?? '').trim() || null;
+  return {
+    name: String(formData.get('contactName') ?? ''),
+    email: text('contactEmail'),
+    phone: text('contactPhone'),
+    jobTitle: text('contactTitle'),
+    isPrimary: formData.get('isPrimary') === 'on',
+  };
+}
+
+/** Adds a contact, or edits one when the form carries a contactId (brief §31). */
 export async function addContact(
   _prev: ClientFormState,
   formData: FormData,
 ): Promise<ClientFormState> {
   const actor = await requireActor();
-  assertCan(actor, 'clients.manage');
-
   const clientId = Number(formData.get('clientId'));
-  const name = String(formData.get('contactName') ?? '').trim();
   if (!Number.isInteger(clientId)) return { error: 'Unknown client.' };
-  if (!name) return { error: 'Enter the contact’s name.' };
-  if (!(await isClientVisible(getDb(), actor, clientId))) return { error: 'Unknown client.' };
+  const rawContactId = formData.get('contactId');
+  const contactId = rawContactId === null ? undefined : Number(rawContactId);
+  if (contactId !== undefined && !Number.isInteger(contactId)) return { error: 'Unknown contact.' };
+  const contact = contactFrom(formData);
 
-  await getDb().insert(clientContacts).values({
-    clientId,
-    name,
-    email: String(formData.get('contactEmail') ?? '').trim() || null,
-    phone: String(formData.get('contactPhone') ?? '').trim() || null,
-    jobTitle: String(formData.get('contactTitle') ?? '').trim() || null,
-    isPrimary: formData.get('isPrimary') === 'on',
-  });
+  try {
+    await saveContact(actor, { clientId, contactId, contact });
+  } catch (error) {
+    if (error instanceof ClientProfileError) return { error: error.message };
+    throw error;
+  }
 
   await recordActivity({
     actorId: actor.id,
-    action: 'client.contact_added',
+    action: contactId === undefined ? 'client.contact_added' : 'client.contact_updated',
     entityType: 'client',
     entityId: clientId,
     clientId,
-    metadata: { name },
+    metadata: { name: contact.name.trim() },
   });
 
   revalidatePath(`/clients/${clientId}`);
-  return { notice: 'Contact added.' };
+  return { notice: contactId === undefined ? 'Contact added.' : 'Contact saved.' };
+}
+
+export async function deleteContact(
+  _prev: ClientFormState,
+  formData: FormData,
+): Promise<ClientFormState> {
+  const actor = await requireActor();
+  const clientId = Number(formData.get('clientId'));
+  const contactId = Number(formData.get('contactId'));
+  if (!Number.isInteger(clientId) || !Number.isInteger(contactId)) return { error: 'Unknown contact.' };
+
+  let removed;
+  try {
+    removed = await removeContact(actor, { clientId, contactId });
+  } catch (error) {
+    if (error instanceof ClientProfileError) return { error: error.message };
+    throw error;
+  }
+
+  await recordActivity({
+    actorId: actor.id,
+    action: 'client.contact_removed',
+    entityType: 'client',
+    entityId: clientId,
+    clientId,
+    metadata: { name: removed.name },
+  });
+
+  revalidatePath(`/clients/${clientId}`);
+  return { notice: `Removed ${removed.name}.` };
+}
+
+/** Edits the permanent client record in place (brief §31). */
+export async function updateClient(
+  _prev: ClientFormState,
+  formData: FormData,
+): Promise<ClientFormState> {
+  const actor = await requireActor();
+  const clientId = Number(formData.get('clientId'));
+  if (!Number.isInteger(clientId)) return { error: 'Unknown client.' };
+  const text = (key: string) => String(formData.get(key) ?? '').trim() || null;
+  const status = String(formData.get('status') ?? '') as ClientStatus;
+  const ownerRaw = formData.get('ownerUserId');
+
+  let result;
+  try {
+    result = await updateClientProfile(actor, {
+      clientId,
+      profile: {
+        name: String(formData.get('name') ?? ''),
+        companyName: text('companyName'),
+        status,
+        clientType: formData.get('clientType') === 'one_off' ? 'one_off' : 'retainer',
+        startedOn: text('startedOn'),
+        notes: text('notes'),
+        // Only present on the form for those who may move a client.
+        ownerUserId: ownerRaw === null ? undefined : ownerRaw === '' ? null : Number(ownerRaw),
+      },
+    });
+  } catch (error) {
+    if (error instanceof ClientProfileError) return { error: error.message };
+    throw error;
+  }
+
+  if (result.changed.length > 0) {
+    await recordActivity({
+      actorId: actor.id,
+      action: 'client.updated',
+      entityType: 'client',
+      entityId: clientId,
+      clientId,
+      metadata: { fields: result.changed },
+    });
+  }
+
+  revalidatePath('/clients');
+  revalidatePath(`/clients/${clientId}`);
+  redirect(`/clients/${clientId}`);
 }
 
 export async function setClientServices(
@@ -142,8 +218,10 @@ export async function setClientServices(
 }
 
 /**
- * Opens the next monthly workspace for a retainer client (brief §37).
- * Permanent client information is not re-entered — only the bucket is new.
+ * "+ Create October 2026" (brief §37): opens the next monthly workspace for
+ * a retainer client. Permanent client information is not re-entered — only
+ * the bucket is new. A month already on record is reported as such; nothing
+ * is written and no second opening is logged.
  */
 export async function createNextMonth(
   _prev: ClientFormState,
@@ -157,28 +235,35 @@ export async function createNextMonth(
   if (!Number.isInteger(clientId) || !Number.isInteger(year) || !Number.isInteger(month)) {
     return { error: 'Unknown month.' };
   }
-  if (!can(actor, 'projects.create')) {
-    return { error: 'You are not permitted to open a month.' };
-  }
-  if (!(await isClientVisible(getDb(), actor, clientId))) return { error: 'Unknown client.' };
 
-  await getDb().execute(sql`
-    INSERT INTO client_months (client_id, period_year, period_month, created_by)
-    VALUES (${clientId}, ${year}, ${month}, ${actor.id})
-    ON CONFLICT (client_id, period_year, period_month) DO NOTHING
-  `);
+  let result;
+  try {
+    result = await openMonth(actor, { clientId, year, month });
+  } catch (error) {
+    if (error instanceof MonthError) return { error: error.message };
+    throw error;
+  }
+
+  const label = formatMonth(year, month);
+  if (!result.created) {
+    return {
+      notice: result.status === 'closed'
+        ? `${label} is already on record and closed. Reopen it to file into it.`
+        : `${label} is already open.`,
+    };
+  }
 
   await recordActivity({
     actorId: actor.id,
     action: 'client.month_opened',
-    entityType: 'client',
-    entityId: clientId,
+    entityType: 'client_month',
+    entityId: result.clientMonthId,
     clientId,
     metadata: { year, month },
   });
 
   revalidatePath(`/clients/${clientId}`);
-  return { notice: 'Month opened.' };
+  return { notice: `${label} created.` };
 }
 
 /** Sales (or the PM) archives a finished month (brief §36). */

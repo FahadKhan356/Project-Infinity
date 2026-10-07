@@ -3,7 +3,7 @@ import { requireActor } from '@/lib/auth/dal';
 import { AppShell } from '@/components/app-shell';
 import { formatMonth } from '@/lib/projects/intake';
 import {
-  DELIVERY_STATUSES, PROJECT_STATUSES, hasAnyFilter, parseSearchParams, searchOptions, searchProjects,
+  DELIVERY_STATUSES, PROJECT_STATUSES, hasAnyFilter, parseSearchParams, searchClients, searchOptions, searchProjects,
   type MatchedOn,
 } from '@/lib/search/search';
 import { statusLabel } from '@/lib/workspace/format';
@@ -26,21 +26,23 @@ export default async function SearchPage(props: PageProps<'/search'>) {
   const actor = await requireActor();
   const params = await props.searchParams;
   const filters = parseSearchParams(params);
-  const [options, hits] = await Promise.all([searchOptions(actor), searchProjects(actor, filters)]);
+  const [options, hits, clients] = await Promise.all([
+    searchOptions(actor), searchProjects(actor, filters), searchClients(actor, filters.q),
+  ]);
   const active = hasAnyFilter(filters);
 
   return (
     <AppShell actor={actor}>
       <h1 className="text-lg font-semibold tracking-tight">Search</h1>
       <p className="mt-1 max-w-prose text-sm text-muted">
-        Find a project by name, code, client, team, person, deliverable, file or revision. Only what
-        you could open anyway is found.
+        Find a project by name, code, client, team, person, deliverable, file, revision or date. Only
+        what you could open anyway is found.
       </p>
 
       <form method="get" action="/search" className="mt-6 rounded-lg border border-border bg-surface p-4">
         <label className="block text-sm font-medium" htmlFor="q">Search for</label>
         <input id="q" name="q" type="search" defaultValue={filters.q ?? ''} autoFocus
-          placeholder="ABC Company, AKT-2026-0001, Ahmed, Video 01, logo…" className={field} />
+          placeholder="ABC Company, AKT-2026-0001, Ahmed, Video 01, logo, Revision #03…" className={field} />
 
         <details className="mt-3" open={active && !filters.q ? true : undefined}>
           <summary className="cursor-pointer text-xs font-medium text-muted">Filters</summary>
@@ -107,6 +109,26 @@ export default async function SearchPage(props: PageProps<'/search'>) {
                   <input id="to" name="to" type="date" defaultValue={filters.deadlineTo ?? ''} className={field} />
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium" htmlFor="created_from">Created from</label>
+                  <input id="created_from" name="created_from" type="date" defaultValue={filters.createdFrom ?? ''} className={field} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium" htmlFor="created_to">to</label>
+                  <input id="created_to" name="created_to" type="date" defaultValue={filters.createdTo ?? ''} className={field} />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium" htmlFor="delivered_from">Delivered from</label>
+                  <input id="delivered_from" name="delivered_from" type="date" defaultValue={filters.deliveredFrom ?? ''} className={field} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium" htmlFor="delivered_to">to</label>
+                  <input id="delivered_to" name="delivered_to" type="date" defaultValue={filters.deliveredTo ?? ''} className={field} />
+                </div>
+              </div>
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" name="revisions" value="open" defaultChecked={filters.openRevisions} />
                 Has an open revision
@@ -122,6 +144,25 @@ export default async function SearchPage(props: PageProps<'/search'>) {
           {active ? <Link href="/search" className="text-sm text-muted hover:underline">Clear</Link> : null}
         </div>
       </form>
+
+      {clients.length > 0 ? (
+        <section className="mt-6">
+          <h2 className="text-sm font-semibold">Clients</h2>
+          <ul className="mt-2 divide-y divide-border rounded-lg border border-border bg-surface">
+            {clients.map((c) => (
+              <li key={c.id} className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm">
+                <div>
+                  <Link href={`/clients/${c.id}`} className="font-medium hover:underline">{c.name}</Link>
+                  {c.companyName ? <span className="ml-2 text-xs text-muted">{c.companyName}</span> : null}
+                </div>
+                <div className="text-xs text-muted">
+                  {c.activeProjects} active · {c.totalProjects} total · {c.status}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <p className="mt-6 text-sm text-muted">
         {hits.length === 0

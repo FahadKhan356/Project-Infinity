@@ -1,8 +1,10 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { createProject, type ProjectFormState } from '../actions';
+import { PendingAttachments, uploadPending } from '@/components/files/pending-attachments';
 import type { MonthOption } from '@/lib/projects/intake';
 
 const initial: ProjectFormState = {};
@@ -17,13 +19,48 @@ interface Props {
   canSetPricing: boolean;
   canCreateClients: boolean;
   preselectedClientId: number | null;
+  /** Filing from a pipeline deal: the project wins it. */
+  opportunity?: { id: number; title: string; clientName: string; value: string | null } | null;
 }
 
 export function NewProjectForm({
-  clients, departments, months, canSetPricing, canCreateClients, preselectedClientId,
+  clients, departments, months, canSetPricing, canCreateClients, preselectedClientId, opportunity = null,
 }: Props) {
+  const router = useRouter();
   const [state, formAction, pending] = useActionState(createProject, initial);
   const [selectedTeams, setSelectedTeams] = useState<number[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
+  const [poFiles, setPoFiles] = useState<File[]>([]);
+  const [attaching, setAttaching] = useState<string>('');
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  // The project exists now; send the PO and references it was filed with,
+  // then open it. If a file fails, the project is still there to retry on:
+  // the form stays done and the error line leads there, since filing again
+  // from here would make a second project.
+  const createdProjectId = state.createdProjectId;
+  useEffect(() => {
+    if (!createdProjectId) return;
+    let cancelled = false;
+    void (async () => {
+      // The PO first, so a failure names the order before a stray reference.
+      const po = await uploadPending(
+        poFiles, { target: 'attachment', projectId: createdProjectId, kind: 'po' }, setAttaching,
+      );
+      if (cancelled) return;
+      const refs = await uploadPending(
+        files, { target: 'attachment', projectId: createdProjectId, purpose: 'brief' }, setAttaching,
+      );
+      if (cancelled) return;
+      const failed = [po.failed ? `the PO document ${po.failed}` : null, refs.failed].filter(Boolean);
+      if (failed.length > 0) setAttachError(`Project filed, but ${failed.join('; ')}`);
+      else router.push(`/projects/${createdProjectId}`);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per filed project
+  }, [createdProjectId]);
+  const filed = createdProjectId !== undefined;
+  const busy = pending || filed;
 
   const toggleTeam = (id: number, on: boolean) =>
     setSelectedTeams((current) => (on ? [...current, id] : current.filter((t) => t !== id)));
@@ -54,6 +91,13 @@ export function NewProjectForm({
 
   return (
     <form action={formAction} className="space-y-6">
+      {opportunity ? (
+        <p role="status" className="rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm">
+          <input type="hidden" name="opportunityId" value={opportunity.id} />
+          Filing this project wins the deal <span className="font-medium">“{opportunity.title}”</span> for{' '}
+          {opportunity.clientName}.
+        </p>
+      ) : null}
       <section className={card}>
         <h2 className="text-sm font-semibold">Client and month</h2>
 
@@ -89,7 +133,8 @@ export function NewProjectForm({
         <h2 className="text-sm font-semibold">The work</h2>
 
         <label className="mt-4 block text-sm font-medium" htmlFor="title">Project name</label>
-        <input id="title" name="title" required className={field} placeholder="10 Social Media Videos" />
+        <input id="title" name="title" required className={field} placeholder="10 Social Media Videos"
+          defaultValue={opportunity?.title ?? ''} />
 
         <label className="mt-4 block text-sm font-medium" htmlFor="projectType">Project / order type</label>
         <input id="projectType" name="projectType" className={field} placeholder="Social media content" />
@@ -105,6 +150,10 @@ export function NewProjectForm({
 
         <label className="mt-4 block text-sm font-medium" htmlFor="requirements">Requirements</label>
         <textarea id="requirements" name="requirements" rows={3} className={field} />
+
+        <label className="mt-4 block text-sm font-medium" htmlFor="otherInfo">Other relevant information</label>
+        <textarea id="otherInfo" name="otherInfo" rows={3} className={field}
+          placeholder="Anything else the team should know: delivery channel, brand assets, approvals" />
       </section>
 
       <section className={card}>
@@ -157,7 +206,8 @@ export function NewProjectForm({
         {canSetPricing ? (
           <div className="mt-4">
             <label className="block text-sm font-medium" htmlFor="priceAmount">Price (AED)</label>
-            <input id="priceAmount" name="priceAmount" type="number" min={0} step="0.01" className={field} />
+            <input id="priceAmount" name="priceAmount" type="number" min={0} step="0.01" className={field}
+              defaultValue={opportunity?.value ?? ''} />
             <p className="mt-1 text-xs text-muted">
               Visible only to management, Sales and the Project Manager.
             </p>
@@ -174,6 +224,30 @@ export function NewProjectForm({
           <input type="checkbox" name="requiresPmQa" defaultChecked />
           Require Project Manager QA before delivery
         </label>
+
+        <label className="mt-2 flex items-center gap-2 text-sm">
+          <input type="checkbox" name="recursMonthly" />
+          Repeats every month — copied into each new month automatically
+        </label>
+      </section>
+
+      <section className={`${card} space-y-5`}>
+        <PendingAttachments
+          files={poFiles}
+          onChange={setPoFiles}
+          multiple={false}
+          disabled={busy}
+          label="PO document"
+          hint="The purchase order itself; the PO reference above is its number. Shown beside it on the project."
+        />
+        <PendingAttachments
+          files={files}
+          onChange={setFiles}
+          disabled={busy}
+          label="Brief and reference files"
+          hint="Attached to the project as soon as it is filed. More can be added on the project page later."
+        />
+        {files.length + poFiles.length > 0 ? <input type="hidden" name="stayAfterCreate" value="1" /> : null}
       </section>
 
       {state.error ? (
@@ -181,10 +255,16 @@ export function NewProjectForm({
           {state.error}
         </p>
       ) : null}
+      {attachError ? (
+        <p role="alert" className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+          {attachError}{' '}
+          <Link href={`/projects/${createdProjectId}`} className="underline">Open the project</Link> to attach the rest.
+        </p>
+      ) : null}
 
-      <button type="submit" disabled={pending}
+      <button type="submit" disabled={busy}
         className="w-full rounded-md bg-accent px-3 py-2.5 text-sm font-medium text-white disabled:opacity-60">
-        {pending ? 'Filing…' : 'File project'}
+        {pending ? 'Filing…' : attaching || (attachError ? 'Filed' : filed ? 'Filed, attaching…' : 'File project')}
       </button>
     </form>
   );

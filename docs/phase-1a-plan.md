@@ -68,9 +68,9 @@ Scoping rules:
 | Role | Sees |
 |---|---|
 | CEO / COO / Admin | Everything |
-| Sales | Projects for clients they own, plus projects they created |
+| Sales | Projects for clients they own, plus projects they created, plus projects shared with them one at a time (`project_viewers`, read-only) |
 | Project Manager | Everything, all departments (§6) |
-| Team Lead | Projects with a `project_departments` row for a department they lead |
+| Team Lead | Projects with a `project_departments` row for a department they lead **that the PM has routed** (`team_lead_id` set) — nothing from intake (§4, §5) |
 | Executive | Projects with an `assignments` row for them — **plus** the shared workspace of those projects (§10) |
 
 Pricing is a **field-level** rule, not a row-level one: `price_amount` is stripped in the serializer unless the user holds `view_pricing` (role-derived for CEO/COO/Admin/Sales/PM, or granted per-user via `user_permissions` for the §23 exception). Strip it server-side — never send it and hide it in CSS.
@@ -175,15 +175,122 @@ differently.
 - **Per-role dashboards (§21) — DONE.** `lib/dashboard`, one scoped loader,
   one page shaped by role. Covered by `tests/dashboard.test.ts`.
 
-Phase 1b is complete. What remains for Phase 1 is confirmation of the open
-questions below and the deployment work in docs/runbook.md on the real
-server.
+Phase 1b is complete.
+
+## Phase 1 — the rest of the brief
+
+- **On Hold / Cancelled (§18) — DONE.** `lib/projects/status`, with
+  `held_from_status` (migration 0004). Held projects take no new work;
+  cancelling withdraws unfinished work and keeps approved files deliverable.
+  Routing no longer rewinds a started project to `planned`.
+- **Attachments (§3, §7, §15) and file deletion (§43) — DONE.** Upload
+  sessions carry an assignment or revision parent; `lib/files/attachments`
+  lists them within `projectScope`/`revisionScope`; soft delete in the UI.
+- **Reports (§5, §39) and Team Overview (§5, §6) — DONE.** `/reports` with
+  CSV export (`reports.export`), `/teams`.
+- **Backups (§44, §45) — DONE, pending a rehearsal on the real server.**
+  `backup` Compose service, scripts in `scripts/backup/`, procedures in
+  docs/runbook.md, and backup health on the management dashboard.
+- **Fixed on the way:** a notification that failed inside a transaction
+  used to take the whole action down with it (postgres.js re-throws a caught
+  query error at commit). `notifyUsers` now uses a driver savepoint. This
+  was also why `npm test` failed when suites ran in parallel.
+
+- **Editing after intake (§3, §27, §31) — DONE.** `lib/projects/edit` for
+  the details Sales filed (`projects.edit`), with pricing-aware
+  notifications and feed lines; `lib/clients/profile` for the client record
+  and its contacts. Covered by `tests/editing.test.ts`. On the way, the
+  duplicate-client check was fixed: Drizzle wraps the driver error, so the
+  "already exists" message never matched and a raw error surfaced instead.
+  Status changes now appear in the project's activity feed.
+
+- **"Approved" and "Ready for Delivery" (§18) — one moment, by design;
+  confirm with the client.** The brief lists both as suggested statuses.
+  Here a file that clears its final QA stage (Team Lead, or the PM where the
+  team requires it) is queued for Sales in the same transaction
+  (`lib/qa/review`), so the project shows `ready_for_delivery` once every
+  slot has cleared and the `approved` project status, though in the enum,
+  is never set. The slot itself does read `approved`. If the client wants a
+  distinct approved stage before Sales sees the file, it is one more status
+  between QA and the delivery row, not a redesign.
+
+Covered by `tests/status.test.ts`, `tests/reports.test.ts`,
+`tests/teams.test.ts` and `tests/backup-health.test.ts`. The backup scripts
+were exercised against PostgreSQL and restic directly, but the Docker image
+itself has not been built yet (no Docker on the development machine).
+
+What remains for Phase 1 is confirmation of the open questions below and
+the deployment work in docs/runbook.md on the real server: the first
+`docker compose up`, the NAS, and a rehearsed rebuild.
+
+## Phase 2 progress (brief §29)
+
+- **File preview (§12) — DONE.** Inline view for images, video, audio and
+  PDF from a server-side allowlist. Covered by `tests/preview.test.ts`.
+- **Client overview counts (§35) — DONE.** Active projects, completed
+  projects and total months on the client page.
+- **Time tracking, employee productivity, team performance and
+  profitability (§29) — DONE.** Migration 0005 adds `time_entries` and
+  `assignments.estimated_minutes`. `lib/time` records time and
+  `lib/reports/productivity` reports on it. Covered by `tests/time.test.ts`.
+  Margin became available with cost rates, below. The rates themselves
+  must come from the client.
+- **Recurring projects (§29) — DONE.** Migration 0006, `lib/projects/recurring`,
+  `scripts/run-recurring.ts` run nightly by host cron (docs/runbook.md).
+  Covered by `tests/recurring.test.ts`.
+- **Cost rates and margin (§29 profitability) — DONE.** Migration 0007,
+  `lib/costs/rates`, CEO/COO only. Covered in `tests/time.test.ts`.
+- **Sales pipeline (§29) — DONE.** Migration 0008, `lib/pipeline`, `/pipeline`,
+  won by filing in one transaction. Covered by `tests/pipeline.test.ts`.
+- **Client portal (§29) — DONE.** Covers client login, the portal, client
+  approval and rejection, and automated delivery. Migrations 0009 and 0010,
+  `lib/portal`. Covered by `tests/portal.test.ts`.
+- **Email, Slack and WhatsApp notifications (§29) — DONE, optional.**
+  Migration 0011, `lib/channels`, `notifier` service. Covered by
+  `tests/channels.test.ts`, against local fake SMTP, Slack and WhatsApp
+  servers.
+- **Automated invoices (§29) — DONE.** Migration 0012, `lib/invoices`.
+  Covered by `tests/invoices.test.ts`.
+- **AI deadline prediction and task assignment (§29) — DONE.** These run
+  offline and are statistical, not a language model. `lib/insights`.
+- **AI project summaries (§29) — DONE, optional.** Migration 0013. Uses
+  Claude Opus 5 through the Anthropic SDK and is off without an API key.
+  Covered by `tests/insights.test.ts`, against a local fake of the API.
+- **Mobile application (§29) — DONE as an installable web app.** No native
+  app store build.
+- **Not built, and each needs a named provider:**
+  - **CRM integration.** Which CRM?
+  - **Cloud storage for working files.** Which service? Off-site backups can
+    already go to S3-compatible storage or Backblaze B2. The credentials are
+    passed to the backup service, and restic encrypts before upload.
+
+## Phase 1 gap sweep (25–26 Sep 2026)
+
+The brief was audited section by section against the portal and the gaps
+closed: the brief's own names and wording (Project Closure Report,
+"Revision #03"), per-role lists (the Executive's slots, uploaded count and
+today's work; the planning overview; read-only shared projects for Sales),
+per-version QA history and notes, rejection with a reason, revision comments,
+closing locked to an open month, notification wording and recipients, stored
+deadline reminders and the automatic month archive (`scripts/nightly.ts`,
+`npm run jobs:nightly`), client start dates, the month picker on copy,
+report/overview parity, attachment purposes and the upload re-check, and the
+private file store on a plain install. Six new suites cover it:
+`tests/w3-planning.test.ts`, `w3-notify`, `w3-qa`, `w3-roles`, `w3-clients`
+and `w3-infra`. An adversarial review of the sweep then found 25 defects —
+one of them an authorisation hole: a rep a project was only shared with,
+holding the `delete_files` grant, could delete its files — all fixed and
+covered by tests; migration 0015 (`client_months.reopened_at`, so the
+nightly archive leaves a reopened month alone) came out of it. Still open:
+the timed recovery drill and measured RTO on the
+real server (docs/runbook.md says where the numbers go), and the CRM and
+cloud-storage providers, which need naming.
 
 ## Open questions — blocking
 
 1. **Progress counting** — approved or uploaded? (blocks M5/M7; see above) — *Built as approved/total, with uploaded and in-QA counts shown beside it. Confirm.*
-2. **"Project Closure Report"** — the brief uses this name for the *new project intake* queue. Keep the name, or rename to something like "Project Intake"? (blocks M4 UI copy and route naming)
-3. ~~**Sales visibility**~~ — **resolved by design, confirm when convenient.** Sales is scoped to their own clients by default; the existing `view_all_clients` grant widens an individual rep to everything, so either answer is a permission toggle rather than a code change.
+2. ~~**"Project Closure Report"**~~ — **resolved by design, confirm when convenient.** The brief uses this name for the *new project intake* queue. The portal now uses it as the brief does: "Project Closure Report" in the navigation, as the page heading, on the dashboard, in the intake form's hint and in the "New project" notices. Only the identifier stays — the route is `/triage` and the loader `intakeQueue`. Renaming later is UI copy only.
+3. ~~**Sales visibility**~~ — **resolved by design, confirm when convenient.** Sales is scoped to their own clients by default. The `view_all_clients` grant widens a rep's *client list* only; to let a rep read one colleague's project (§23 "authorized to view"), management or the PM shares that project from its page, which never moves the client.
 4. **File volume** — expected GB/month, and the server's current disk, RAM, CPU? (blocks M0 sizing and the backup target decision)
 5. **Backup hardware** — is a second machine or NAS available, or does one need buying? (blocks M0)
 6. **Currency** — schema defaults to AED. Confirm, and confirm whether multi-currency is ever needed.

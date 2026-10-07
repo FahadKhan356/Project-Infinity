@@ -2,8 +2,9 @@ import 'server-only';
 import { sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
+import { can, revisionScope } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
-import { mayUploadTo } from '@/lib/files/access';
+import { mayUploadTo, uploadBlockedReason } from '@/lib/files/access';
 import { isProjectMonthClosed } from '@/lib/months/lifecycle';
 
 /**
@@ -26,6 +27,10 @@ export interface WorkspaceVersion {
   notes: string | null;
   isDeleted: boolean;
   downloadUrl: string;
+  /** Every QA decision on this version, newest first (brief §19). */
+  reviews: WorkspaceReview[];
+  /** The thread on this version, oldest first (brief §10, §19). */
+  comments: WorkspaceComment[];
 }
 
 export interface WorkspaceReview {
@@ -66,6 +71,12 @@ export interface WorkspaceOpenRevision {
   priority: string;
   deadline: string | null;
   status: string;
+  /**
+   * Whether /revisions/[id] opens for this person — an Executive reads a
+   * previous project's revisions here (§8) but opens only those on their
+   * current work (§16).
+   */
+  canOpen: boolean;
 }
 
 export interface WorkspaceRevision {
@@ -76,6 +87,12 @@ export interface WorkspaceRevision {
   priority: string;
   deadline: string | null;
   deliverableNames: string[];
+  /**
+   * Whether /revisions/[id] opens for this person — an Executive reads a
+   * previous project's revisions here (§8) but opens only those on their
+   * current work (§16).
+   */
+  canOpen: boolean;
 }
 
 export interface WorkspaceAssignment {
@@ -92,6 +109,13 @@ export interface WorkspaceAssignment {
   total: number;
   approved: number;
   uploaded: number;
+  /**
+   * Time logged and the lead's estimate, in minutes (brief §29). Effort is
+   * personal: it is null for everyone but the assignee, their Team Lead and
+   * those who see every team — colleagues on the project see the files, not
+   * each other's hours.
+   */
+  effort: { loggedMinutes: number; estimatedMinutes: number | null } | null;
 }
 
 export interface WorkspaceMember {
@@ -120,6 +144,12 @@ export interface WorkspaceComment {
   createdAt: string;
   deliverableId: number | null;
   deliverableName: string | null;
+  /**
+   * Set for a comment left on one upload (§10, §19); the slot fields then
+   * name that version's slot.
+   */
+  versionId: number | null;
+  versionNo: number | null;
 }
 
 export interface Workspace {
@@ -130,7 +160,11 @@ export interface Workspace {
    */
   monthClosed: boolean;
   teams: WorkspaceTeam[];
-  /** Oldest first, so the thread reads top to bottom. */
+  /**
+   * The project's and its slots' comments, oldest first, so the thread reads
+   * top to bottom. A comment on one upload hangs under that version instead
+   * (WorkspaceVersion.comments).
+   */
   comments: WorkspaceComment[];
   /** Every revision on the project, newest first (§9 "view project revisions"). */
   revisions: WorkspaceRevision[];
@@ -143,7 +177,7 @@ const iso = (column: ReturnType<typeof sql.raw>) =>
 /** null when the project is outside the actor's scope — indistinguishable from absent. */
 export async function loadWorkspace(actor: Actor, projectId: number): Promise<Workspace | null> {
   const db = getDb();
-  if (!(await isProjectVisible(db, actor, projectId))) return null;
+  if (!(await isProjectVisible(db, actor, projectId, { shared: true }))) return null;
   const monthClosed = await isProjectMonthClosed(db, projectId);
 
   const [teamRows, assignmentRows, deliverableRows, versionRows, reviewRows, commentRows, revisionRows] = await Promise.all([
@@ -163,9 +197,11 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
       id: number; project_department_id: number; title: string; assignee_id: number; assignee: string;
       instructions: string | null; start_date: string | null; end_date: string | null;
       priority: string; status: string; total: number; approved: number; uploaded: number;
+      estimated_minutes: number | null; logged_minutes: number;
     }>(sql`
       SELECT a.id, a.project_department_id, a.title, a.assignee_id, u.full_name AS assignee,
-             a.instructions,
+             a.instructions, a.estimated_minutes,
+             (SELECT COALESCE(sum(te.minutes), 0) FROM time_entries te WHERE te.assignment_id = a.id)::int AS logged_minutes,
              to_char(a.start_date, 'YYYY-MM-DD') AS start_date,
              to_char(a.end_date, 'YYYY-MM-DD')   AS end_date,
              a.priority, a.status,
@@ -212,11 +248,10 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
       ORDER BY v.deliverable_id, v.version_no DESC
     `),
     db.execute<{
-      deliverable_id: number; stage: WorkspaceReview['stage']; decision: WorkspaceReview['decision'];
+      deliverable_id: number; version_id: number; stage: WorkspaceReview['stage']; decision: WorkspaceReview['decision'];
       comments: string | null; reviewer: string; reviewed_at: string; version_no: number;
     }>(sql`
-      SELECT DISTINCT ON (v.deliverable_id)
-             v.deliverable_id, q.stage, q.decision, q.comments, u.full_name AS reviewer,
+      SELECT v.deliverable_id, v.id AS version_id, q.stage, q.decision, q.comments, u.full_name AS reviewer,
              ${iso(sql.raw('q.reviewed_at'))} AS reviewed_at, v.version_no
       FROM qa_reviews q
       JOIN deliverable_versions v ON v.id = q.deliverable_version_id
@@ -228,22 +263,30 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
     db.execute<{
       id: number; author_id: number; author: string; body: string; created_at: string;
       deliverable_id: number | null; deliverable_name: string | null;
+      version_id: number | null; version_no: number | null;
     }>(sql`
       SELECT c.id, c.author_id, u.full_name AS author, c.body,
              ${iso(sql.raw('c.created_at'))} AS created_at,
-             c.deliverable_id, dv.name AS deliverable_name
+             COALESCE(c.deliverable_id, cv.deliverable_id) AS deliverable_id,
+             COALESCE(dv.name, cvd.name) AS deliverable_name,
+             c.version_id, cv.version_no
       FROM comments c
       JOIN users u ON u.id = c.author_id
       LEFT JOIN deliverables dv ON dv.id = c.deliverable_id
       LEFT JOIN assignments a   ON a.id = c.assignment_id
+      -- A comment on one upload (§10, §19) reaches the project through its slot.
+      LEFT JOIN deliverable_versions cv ON cv.id = c.version_id
+      LEFT JOIN deliverables cvd        ON cvd.id = cv.deliverable_id
       WHERE c.project_id = ${projectId}
          OR dv.project_id = ${projectId}
          OR a.project_id = ${projectId}
+         OR cvd.project_id = ${projectId}
       ORDER BY c.created_at, c.id
     `),
     db.execute<{
       id: number; revision_no: number; title: string; status: string; priority: string;
       deadline: string | null; client_feedback: string; deliverable_ids: number[]; deliverable_names: string[];
+      can_open: boolean;
     }>(sql`
       SELECT r.id, r.revision_no, r.title, r.status, r.priority, r.client_feedback,
              to_char(r.deadline, 'YYYY-MM-DD') AS deadline,
@@ -251,9 +294,16 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
                          FROM revision_deliverables rd WHERE rd.revision_id = r.id), '{}') AS deliverable_ids,
              COALESCE((SELECT array_agg(d.name ORDER BY d.project_department_id, d.sequence_no)
                          FROM revision_deliverables rd JOIN deliverables d ON d.id = rd.deliverable_id
-                        WHERE rd.revision_id = r.id), '{}') AS deliverable_names
+                        WHERE rd.revision_id = r.id), '{}') AS deliverable_names,
+             -- The rule /revisions/[id] applies (loadRevision): the page
+             -- links only what would open.
+             ${revisionScope(actor, 'r', { shared: true })} AS can_open
       FROM revisions r
-      WHERE r.project_id = ${projectId}
+      -- What this person may read here (§16): the Design lead is not shown
+      -- the video note, a rep the project is shared with reads them all, and
+      -- an Executive reads the project's history (§8) — every revision on a
+      -- project of theirs, not only those on their current work.
+      WHERE r.project_id = ${projectId} AND ${revisionScope(actor, 'r', { shared: true, history: true })}
       ORDER BY r.revision_no DESC
     `),
   ]);
@@ -272,8 +322,53 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
         priority: r.priority,
         deadline: r.deadline,
         status: r.status,
+        canOpen: r.can_open === true,
       });
     }
+  }
+
+  // Every QA round, kept per version so the history (§19) shows what each
+  // one was judged; the newest per slot is also surfaced as `lastReview`.
+  const reviewsByVersion = new Map<number, WorkspaceReview[]>();
+  const reviewBySlot = new Map<number, WorkspaceReview>();
+  for (const r of reviewRows) {
+    const review: WorkspaceReview = {
+      stage: r.stage,
+      decision: r.decision,
+      comments: r.comments,
+      reviewer: r.reviewer,
+      reviewedAt: r.reviewed_at,
+      versionNo: Number(r.version_no),
+    };
+    const list = reviewsByVersion.get(Number(r.version_id)) ?? [];
+    list.push(review);
+    reviewsByVersion.set(Number(r.version_id), list);
+    if (!reviewBySlot.has(Number(r.deliverable_id))) reviewBySlot.set(Number(r.deliverable_id), review);
+  }
+
+  // A comment on one upload lives under that version (§10, §19); the rest
+  // make up the project thread.
+  const commentsByVersion = new Map<number, WorkspaceComment[]>();
+  const thread: WorkspaceComment[] = [];
+  for (const c of commentRows) {
+    const comment: WorkspaceComment = {
+      id: Number(c.id),
+      authorId: Number(c.author_id),
+      author: c.author,
+      body: c.body,
+      createdAt: c.created_at,
+      deliverableId: c.deliverable_id === null ? null : Number(c.deliverable_id),
+      deliverableName: c.deliverable_name,
+      versionId: c.version_id === null ? null : Number(c.version_id),
+      versionNo: c.version_no === null ? null : Number(c.version_no),
+    };
+    if (comment.versionId === null) {
+      thread.push(comment);
+      continue;
+    }
+    const list = commentsByVersion.get(comment.versionId) ?? [];
+    list.push(comment);
+    commentsByVersion.set(comment.versionId, list);
   }
 
   const versionsBySlot = new Map<number, WorkspaceVersion[]>();
@@ -291,20 +386,10 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
       notes: v.notes,
       isDeleted: v.deleted === true,
       downloadUrl: `/api/files/${v.storage_key}`,
+      reviews: reviewsByVersion.get(Number(v.id)) ?? [],
+      comments: commentsByVersion.get(Number(v.id)) ?? [],
     });
     versionsBySlot.set(Number(v.deliverable_id), list);
-  }
-
-  const reviewBySlot = new Map<number, WorkspaceReview>();
-  for (const r of reviewRows) {
-    reviewBySlot.set(Number(r.deliverable_id), {
-      stage: r.stage,
-      decision: r.decision,
-      comments: r.comments,
-      reviewer: r.reviewer,
-      reviewedAt: r.reviewed_at,
-      versionNo: Number(r.version_no),
-    });
   }
 
   const teams: WorkspaceTeam[] = teamRows.map((t) => {
@@ -327,6 +412,13 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
         total: Number(a.total),
         approved: Number(a.approved),
         uploaded: Number(a.uploaded),
+        effort: Number(a.assignee_id) === actor.id || actor.leadDepartmentIds.includes(departmentId)
+          || can(actor, 'projects.viewAll')
+          ? {
+            loggedMinutes: Number(a.logged_minutes),
+            estimatedMinutes: a.estimated_minutes === null ? null : Number(a.estimated_minutes),
+          }
+          : null,
       }));
 
     const members = new Map<number, WorkspaceMember>();
@@ -347,7 +439,7 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
           assignmentId: d.assignment_id === null ? null : Number(d.assignment_id),
           assigneeId,
           assignee: d.assignee,
-          canUpload: !monthClosed && mayUploadTo(actor, { assigneeId, departmentId }),
+          canUpload: !monthClosed && uploadBlockedReason(d.status) === null && mayUploadTo(actor, { assigneeId, departmentId }),
           currentVersion: versions[0] ?? null,
           versions,
           lastReview: reviewBySlot.get(Number(d.id)) ?? null,
@@ -372,15 +464,7 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
     projectId,
     monthClosed,
     teams,
-    comments: commentRows.map((c) => ({
-      id: Number(c.id),
-      authorId: Number(c.author_id),
-      author: c.author,
-      body: c.body,
-      createdAt: c.created_at,
-      deliverableId: c.deliverable_id === null ? null : Number(c.deliverable_id),
-      deliverableName: c.deliverable_name,
-    })),
+    comments: thread,
     revisions: revisionRows.map((r) => ({
       id: Number(r.id),
       revisionNo: Number(r.revision_no),
@@ -389,6 +473,7 @@ export async function loadWorkspace(actor: Actor, projectId: number): Promise<Wo
       priority: r.priority,
       deadline: r.deadline,
       deliverableNames: r.deliverable_names ?? [],
+      canOpen: r.can_open === true,
     })),
   };
 }

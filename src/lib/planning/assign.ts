@@ -1,11 +1,13 @@
 import 'server-only';
+import { parseHours } from '@/lib/time/format';
 import { and, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { assignments, departmentMembers, deliverables } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
-import { can } from '@/lib/authz';
+import { can, canPlanTeam } from '@/lib/authz';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { onAssignmentCreated } from '@/lib/notifications/notify';
+import { workBlockedReason } from '@/lib/projects/status';
 
 export class PlanningError extends Error {}
 
@@ -26,6 +28,8 @@ export interface AssignmentInput {
   deliverableBaseName?: string | null;
   deliverableDescription?: string | null;
   dueDate?: string | null;
+  /** Planned effort (brief §29 time tracking), compared with logged time in reports. */
+  estimatedMinutes?: number | null;
 }
 
 export interface AssignmentResult {
@@ -79,18 +83,22 @@ export async function createAssignment(
   `);
   if (!team) throw new PlanningError('No such team on that project.');
 
-  // Only the lead of this team may plan it — or the Project Manager, who
-  // oversees every department (§6).
-  const isLeadOfTeam =
-    team.team_lead_id !== null && Number(team.team_lead_id) === actor.id;
-  if (!isLeadOfTeam && !can(actor, 'planning.viewAllDepartments')) {
+  // Only a lead of this team's department may plan it once it is routed —
+  // the named lead or a co-lead — or the Project Manager, who oversees every
+  // department (§6).
+  const mayPlan = canPlanTeam(actor, {
+    departmentId: Number(team.department_id),
+    teamLeadId: team.team_lead_id === null ? null : Number(team.team_lead_id),
+  });
+  if (!mayPlan) {
     throw new PlanningError('This team is not yours to plan.');
   }
 
-  if (team.project_status === 'cancelled' || team.project_status === 'completed') {
-    throw new PlanningError('That project is closed.');
-  }
+  // The archive speaks first: a closed month explains more than the status of
+  // one project in it.
   await assertMonthOpen(db, { projectId: Number(team.project_id) }, (m) => new PlanningError(m));
+  const blocked = workBlockedReason(team.project_status);
+  if (blocked) throw new PlanningError(blocked);
 
   // The assignee must belong to the department doing the work. Otherwise a
   // designer could be handed video deliverables that their own QA panel would
@@ -130,6 +138,7 @@ export async function createAssignment(
         startDate: input.startDate ?? null,
         endDate: input.endDate ?? null,
         priority: input.priority ?? 'normal',
+        estimatedMinutes: input.estimatedMinutes ?? null,
       })
       .returning({ id: assignments.id });
 
@@ -202,5 +211,14 @@ export function parseAssignmentForm(formData: FormData): AssignmentInput {
     deliverableBaseName: text('deliverableBaseName'),
     deliverableDescription: text('deliverableDescription'),
     dueDate: text('dueDate'),
+    estimatedMinutes: estimate(text('estimatedHours')),
   };
+}
+
+function estimate(value: string | null): number | null {
+  try {
+    return parseHours(value);
+  } catch {
+    throw new PlanningError('Enter the estimate in hours, like 6, 1.5 or 2:30.');
+  }
 }

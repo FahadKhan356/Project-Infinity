@@ -8,7 +8,7 @@ const initial: ClientFormState = {};
 const field =
   'mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-accent';
 
-export function NewClientForm() {
+export function NewClientForm({ prospect = false }: { prospect?: boolean }) {
   const [state, formAction, pending] = useActionState(createClient, initial);
 
   return (
@@ -25,6 +25,16 @@ export function NewClientForm() {
         <option value="one_off">One-off — a single engagement</option>
       </select>
 
+      <label className="mt-4 block text-sm font-medium" htmlFor="startedOn">Client since</label>
+      <input id="startedOn" name="startedOn" type="date" className={field}
+        defaultValue={new Date().toISOString().slice(0, 10)} />
+      <p className="mt-1 text-xs text-muted">Left as it is for a prospect until they become a client.</p>
+
+      <label className="mt-4 flex items-center gap-2 text-sm">
+        <input type="checkbox" name="prospect" defaultChecked={prospect} />
+        Prospect — nothing confirmed yet; becomes active when their first project is filed from the pipeline
+      </label>
+
       <label className="mt-4 block text-sm font-medium" htmlFor="notes">Notes</label>
       <textarea id="notes" name="notes" rows={3} className={field} />
 
@@ -38,6 +48,9 @@ export function NewClientForm() {
           {state.notice}{' '}
           {state.clientId ? (
             <Link href={`/clients/${state.clientId}`} className="underline">Open the record</Link>
+          ) : null}
+          {state.clientId && prospect ? (
+            <> · <Link href="/pipeline" className="underline">Back to the pipeline</Link></>
           ) : null}
         </p>
       ) : null}

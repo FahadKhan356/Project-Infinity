@@ -3,13 +3,21 @@
  *
  * Soft-deleted files keep their bytes so an accidental delete is recoverable.
  * This removes the bytes once the retention window has passed, and clears
- * abandoned upload sessions. Intended to run nightly beside the backups.
+ * abandoned upload sessions. In Docker the `scheduler` service runs it
+ * nightly before the backup; without Docker, schedule it yourself
+ * (docs/runbook.md, "Scheduled jobs").
  *
  *   tsx scripts/sweep-files.ts [--retention-days 30] [--dry-run]
+ *
+ * A real run records its result under STORAGE_ROOT/jobs/sweep.json for the
+ * dashboard and /api/health (src/lib/jobs); a dry run records nothing.
+ * Runs without the react-server condition, so src/lib/jobs/runs is the only
+ * portal module it may import.
  */
 import { unlink } from 'node:fs/promises';
 import path from 'node:path';
 import postgres from 'postgres';
+import { runJob } from '../src/lib/jobs/runs';
 
 function arg(name: string, fallback: string): string {
   const index = process.argv.indexOf(`--${name}`);
@@ -44,7 +52,7 @@ async function main() {
     return true;
   };
 
-  try {
+  const sweep = async (): Promise<string> => {
     const expired = await sql<{ id: number; storage_path: string }[]>`
       SELECT id, storage_path FROM files
       WHERE deleted_at IS NOT NULL
@@ -73,10 +81,15 @@ async function main() {
       await sql`DELETE FROM upload_sessions WHERE id IN ${sql(stale.map((s) => s.id))}`;
     }
 
-    console.log(
-      `${dryRun ? '[dry run] ' : ''}purged ${purged} deleted file(s) past ${retentionDays} days, ` +
-        `cleared ${stale.length} abandoned upload(s).`,
-    );
+    const summary = `purged ${purged} deleted file(s) past ${retentionDays} days, cleared ${stale.length} abandoned upload(s).`;
+    console.log(`${dryRun ? '[dry run] ' : ''}${summary}`);
+    return summary;
+  };
+
+  try {
+    // A dry run is not a run: it leaves no record behind.
+    if (dryRun) await sweep();
+    else await runJob('sweep', sweep);
   } finally {
     await sql.end();
   }

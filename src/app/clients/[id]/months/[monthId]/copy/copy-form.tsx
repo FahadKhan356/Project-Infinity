@@ -1,6 +1,8 @@
 'use client';
 
 import { useActionState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { copyClientMonth, type ClientFormState } from '@/app/clients/actions';
 import type { CopyPlan } from '@/lib/months/copy';
 
@@ -14,28 +16,59 @@ const card = 'rounded-lg border border-border bg-surface p-5';
  * is listed, ticked, with the parts Sales may change laid out as fields.
  * Untick a project to leave it behind; untick a team to drop it from the
  * copy. Files and deliverables are not on offer — only the orders are.
+ *
+ * The target month is chosen outside the copy form: changing it reloads
+ * the page with `?to=`, so the plan — suggested deadlines, the month's
+ * status — is built for the month actually chosen, and the copy form
+ * submits exactly that month.
  */
-export function CopyMonthForm({ plan, canSetPricing }: { plan: CopyPlan; canSetPricing: boolean }) {
+export function CopyMonthForm({
+  plan, canSetPricing, monthError = null,
+}: {
+  plan: CopyPlan;
+  canSetPricing: boolean;
+  /** Why the `?to=` asked for was not taken; the plan is then for the default month. */
+  monthError?: string | null;
+}) {
   const [state, formAction, pending] = useActionState(copyClientMonth, initial);
+  const router = useRouter();
   const targetClosed = plan.target.status === 'closed';
+  const pagePath = `/clients/${plan.clientId}/months/${plan.source.id}/copy`;
 
   return (
-    <form action={formAction} className="space-y-4">
-      <input type="hidden" name="clientId" value={plan.clientId} />
-      <input type="hidden" name="fromMonthId" value={plan.source.id} />
-
-      <section className={card}>
-        <label className="block text-sm font-medium" htmlFor="period">Copy into</label>
-        <input id="period" name="period" type="month" required defaultValue={plan.target.value}
-          min="2020-01" max="2100-12" className={`${field} max-w-xs`} />
+    <div className="space-y-4">
+      <form method="get" action={pagePath} className={card}>
+        <label className="block text-sm font-medium" htmlFor="to">Copy into</label>
+        <div className="flex flex-wrap items-end gap-2">
+          {/* Browsers that render type="month" as plain text hold the value to the pattern. */}
+          <input id="to" name="to" type="month" required defaultValue={plan.target.value}
+            min="2020-01" max="2100-12" pattern="[0-9]{4}-[0-9]{2}" title="A month as YYYY-MM"
+            className={`${field} max-w-xs`}
+            onChange={(e) => {
+              const value = e.currentTarget.value;
+              if (/^\d{4}-\d{2}$/.test(value) && value !== plan.target.value) router.replace(`${pagePath}?to=${value}`);
+            }} />
+          <button type="submit" className="rounded-md border border-border px-3 py-2 text-sm font-medium">
+            Change month
+          </button>
+        </div>
+        {monthError ? (
+          <p role="alert" className="mt-1.5 text-xs text-red-600 dark:text-red-400">{monthError}</p>
+        ) : null}
         <p className="mt-1.5 text-xs text-muted">
           {plan.target.status === null
             ? `${plan.target.label} will be opened for ${plan.clientName} as part of the copy.`
             : targetClosed
               ? `${plan.target.label} is closed. Reopen it, or choose another month.`
               : `${plan.target.label} is already open; the copies are added to it.`}
+          {' '}Deadlines below are suggested for {plan.target.label}.
         </p>
-      </section>
+      </form>
+
+    <form action={formAction} className="space-y-4">
+      <input type="hidden" name="clientId" value={plan.clientId} />
+      <input type="hidden" name="fromMonthId" value={plan.source.id} />
+      <input type="hidden" name="period" value={plan.target.value} />
 
       {plan.projects.length === 0 ? (
         <p className={`${card} text-sm text-muted`}>
@@ -65,16 +98,21 @@ export function CopyMonthForm({ plan, canSetPricing }: { plan: CopyPlan; canSetP
               <div className="sm:col-span-2">
                 <span className="block text-xs font-medium">Teams and deliverables</span>
                 <ul className="mt-1.5 grid gap-2 sm:grid-cols-2">
-                  {p.departments.map((d) => (
-                    <li key={d.departmentId} className="flex items-center gap-2">
-                      <input type="checkbox" name={`dept_${p.id}`} value={d.departmentId} defaultChecked
-                        id={`dept_${p.id}_${d.departmentId}`} />
-                      <label htmlFor={`dept_${p.id}_${d.departmentId}`} className="w-28 text-sm">{d.name}</label>
-                      <input type="number" min={0} max={500} name={`planned_${p.id}_${d.departmentId}`}
-                        defaultValue={d.plannedDeliverables} aria-label={`${d.name} deliverables`}
-                        className="w-20 rounded-md border border-border bg-background px-2 py-1 text-sm tabular-nums" />
-                    </li>
-                  ))}
+                  {plan.availableDepartments.map((dept) => {
+                    const onSource = p.departments.find((d) => d.departmentId === dept.id) ?? null;
+                    return (
+                      <li key={dept.id} className={`flex items-center gap-2 ${onSource ? '' : 'text-muted'}`}>
+                        <input type="checkbox" name={`dept_${p.id}`} value={dept.id} defaultChecked={onSource !== null}
+                          id={`dept_${p.id}_${dept.id}`} />
+                        <label htmlFor={`dept_${p.id}_${dept.id}`} className="w-28 text-sm">
+                          {dept.name}{onSource ? '' : <span className="ml-1 text-xs">(add)</span>}
+                        </label>
+                        <input type="number" min={0} max={500} name={`planned_${p.id}_${dept.id}`}
+                          defaultValue={onSource?.plannedDeliverables ?? 0} aria-label={`${dept.name} deliverables`}
+                          className="w-20 rounded-md border border-border bg-background px-2 py-1 text-sm tabular-nums" />
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
 
@@ -132,6 +170,12 @@ export function CopyMonthForm({ plan, canSetPricing }: { plan: CopyPlan; canSetP
           Each copy is a new project with a new code, filed as new for the Project Manager.
         </span>
       </div>
+      <p className="text-xs text-muted">
+        Something new this month that was not in {plan.source.label}?{' '}
+        <Link href={`/projects/new?client=${plan.clientId}`} className="underline">File a new project</Link> for it
+        after the copy.
+      </p>
     </form>
+    </div>
   );
 }

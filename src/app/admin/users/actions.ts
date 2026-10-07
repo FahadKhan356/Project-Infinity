@@ -9,13 +9,8 @@ import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import { hashPassword, passwordProblem } from '@/lib/auth/password';
 import { destroyAllSessionsFor } from '@/lib/auth/session';
-import { assertCan, type Permission, type Role } from '@/lib/authz';
-
-const ROLES: Role[] = ['ceo', 'coo', 'admin', 'sales', 'project_manager', 'team_lead', 'executive'];
-const PERMISSIONS: Permission[] = [
-  'view_pricing', 'manage_users', 'close_month', 'reopen_month',
-  'delete_files', 'export_reports', 'view_all_clients',
-];
+import { ALL_PERMISSIONS, assertCan, grantablePermissions, type Permission, type Role } from '@/lib/authz';
+import { ROLES, resolveAccountFields } from './account-fields';
 
 export interface FormState {
   error?: string;
@@ -76,22 +71,26 @@ export async function updateUser(_prev: FormState, formData: FormData): Promise<
 
   const userId = Number(formData.get('userId'));
   const fullName = String(formData.get('fullName') ?? '').trim();
-  const role = String(formData.get('role') ?? '') as Role;
-  const isActive = formData.get('isActive') === 'on';
 
   if (!Number.isInteger(userId)) return { error: 'Unknown user.' };
   if (!fullName) return { error: 'Enter the person’s name.' };
-  if (!ROLES.includes(role)) return { error: 'Choose a role.' };
-
-  // Guard against locking the last administrator out of their own portal.
-  if (userId === actor.id && !isActive) {
-    return { error: 'You cannot deactivate your own account.' };
-  }
-  if (userId === actor.id && role !== actor.role) {
-    return { error: 'You cannot change your own role. Ask another administrator.' };
-  }
 
   const db = getDb();
+  const [target] = await db
+    .select({ role: users.role, isActive: users.isActive })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!target) return { error: 'Unknown user.' };
+  if (target.role === 'client') {
+    return { error: 'This is a client portal login. Manage it from the client’s page.' };
+  }
+
+  // Your own role and status stay as stored (./account-fields).
+  const fields = resolveAccountFields(userId === actor.id, target, formData);
+  if ('error' in fields) return fields;
+  const { role, isActive } = fields;
+
   await db.update(users).set({ fullName, role, isActive }).where(eq(users.id, userId));
 
   // A deactivated or demoted user must lose access immediately, not when their
@@ -155,10 +154,20 @@ export async function setPermissions(_prev: FormState, formData: FormData): Prom
   const userId = Number(formData.get('userId'));
   if (!Number.isInteger(userId)) return { error: 'Unknown user.' };
 
+  const [target] = await getDb().select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!target) return { error: 'Unknown user.' };
+
   const granted = formData
     .getAll('permission')
     .map(String)
-    .filter((p): p is Permission => PERMISSIONS.includes(p as Permission));
+    .filter((p): p is Permission => ALL_PERMISSIONS.includes(p as Permission));
+  // A grant the role cannot hold (pricing for an Executive, say) is refused
+  // rather than silently dropped, so a stale form does not save the wrong thing.
+  const allowed = grantablePermissions(target.role);
+  const refused = granted.filter((p) => !allowed.includes(p));
+  if (refused.length > 0) {
+    return { error: `A ${target.role.replace('_', ' ')} cannot be granted: ${refused.join(', ')}.` };
+  }
 
   // Do not let an administrator revoke their own ability to administer.
   if (userId === actor.id && !granted.includes('manage_users') && actor.role !== 'ceo' && actor.role !== 'coo' && actor.role !== 'admin') {

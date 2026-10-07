@@ -7,6 +7,15 @@ import { upcomingDeadlines, type Deadline } from '@/lib/notifications/inbox';
 import { teamWorkload, type MemberWorkload } from '@/lib/planning/workload';
 
 /**
+ * Department performance (brief §21): throughput counts the slots a team
+ * had approved in the last 30 days, and the on-time rate is over the last
+ * 90 days' approvals. The page builds its caption from these same numbers,
+ * so the text cannot drift from the query.
+ */
+export const THROUGHPUT_WINDOW_DAYS = 30;
+export const ON_TIME_WINDOW_DAYS = 90;
+
+/**
  * Per-role dashboards (brief §21). Every number is produced by composing
  * `projectScope`, so the same function serves every role and the counts a
  * Team Lead sees are the counts over the projects they can open — never a
@@ -40,6 +49,14 @@ export interface DepartmentSummary {
   approved: number;
   reviews: number;
   rejected: number;
+  /** Slots approved in the last `THROUGHPUT_WINDOW_DAYS` days. */
+  throughput: number;
+  /** Approvals in the last `ON_TIME_WINDOW_DAYS` days that had a date to be judged by. */
+  onTimeMeasured: number;
+  /** Of those, how many were approved on or before that date. */
+  onTime: number;
+  /** `onTime / onTimeMeasured` as a whole percent; null when nothing was measured (shown as n/a). */
+  onTimeRate: number | null;
 }
 
 export interface DepartmentWorkload {
@@ -66,6 +83,8 @@ export interface PlanningGap {
 }
 
 export interface ExecutiveSummary {
+  /** Open assignments whose planned start–end window holds today (§21). */
+  todayAssignments: number;
   activeAssignments: number;
   currentProjects: number;
   pendingDeliverables: number;
@@ -105,6 +124,9 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
            count(*) FILTER (WHERE p.status = 'planned')::int AS planned,
            count(*) FILTER (WHERE p.status = 'in_progress')::int AS in_progress,
            count(*) FILTER (WHERE p.status NOT IN ('completed','cancelled') AND prog.in_qa > 0)::int AS in_qa,
+           -- A project count under projectScope (§8): an Executive's previous
+           -- project sent back for a round they are not on still counts here,
+           -- though the round itself is outside their revision scope (§16).
            count(*) FILTER (WHERE p.status = 'revision_required')::int AS in_revision,
            count(*) FILTER (WHERE p.status NOT IN ('completed','cancelled') AND EXISTS (
              SELECT 1 FROM deliveries dl WHERE dl.project_id = p.id AND dl.status = 'pending_delivery'))::int AS awaiting_delivery,
@@ -145,15 +167,17 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
     : sql``;
   const departmentRows = isExecutive ? [] : await db.execute<{
     id: number; name: string; active_projects: number; open_slots: number; in_qa: number; approved: number;
-    reviews: number; rejected: number;
+    reviews: number; rejected: number; throughput: number; on_time_measured: number; on_time: number;
   }>(sql`
-    WITH visible AS (SELECT p.id, p.status FROM projects p WHERE ${scope})
+    WITH visible AS (SELECT p.id, p.status, p.deadline FROM projects p WHERE ${scope})
     SELECT d.id, d.name,
            (SELECT count(DISTINCT pd.project_id)::int FROM project_departments pd
               JOIN visible v ON v.id = pd.project_id
              WHERE pd.department_id = d.id AND v.status NOT IN ('completed','cancelled')) AS active_projects,
            COALESCE(s.open_slots, 0) AS open_slots, COALESCE(s.in_qa, 0) AS in_qa, COALESCE(s.approved, 0) AS approved,
-           COALESCE(q.reviews, 0) AS reviews, COALESCE(q.rejected, 0) AS rejected
+           COALESCE(q.reviews, 0) AS reviews, COALESCE(q.rejected, 0) AS rejected,
+           COALESCE(t.throughput, 0) AS throughput,
+           COALESCE(t.on_time_measured, 0) AS on_time_measured, COALESCE(t.on_time, 0) AS on_time
     FROM departments d
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE dv.status NOT IN ('approved','delivered','cancelled'))::int AS open_slots,
@@ -174,14 +198,41 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
       JOIN visible v ON v.id = dv.project_id
       WHERE pd.department_id = d.id
     ) q ON true
+    -- Department performance (§21). An approval is a deliveries row: the
+    -- moment a slot clears its last QA stage (qa/review), whatever became of
+    -- the delivery afterwards, and once per approval when a slot is approved
+    -- again after a revision (as the forecast pace and the productivity
+    -- report count it). Approvals on a project cancelled afterwards stay
+    -- counted for the same reason: the team did the work. A slot is judged
+    -- by its own due date, or by the project deadline when it has none; one
+    -- with neither is left out of the rate rather than read as always late
+    -- or always on time. The approval day is taken in the DB session's time
+    -- zone, as the productivity report takes it.
+    LEFT JOIN LATERAL (
+      SELECT count(*) FILTER (WHERE dl.approved_at > now() - make_interval(days => ${THROUGHPUT_WINDOW_DAYS}))::int AS throughput,
+             count(*) FILTER (WHERE COALESCE(dv.due_date, v.deadline) IS NOT NULL)::int AS on_time_measured,
+             count(*) FILTER (WHERE dl.approved_at::date <= COALESCE(dv.due_date, v.deadline))::int AS on_time
+      FROM deliveries dl
+      JOIN deliverables dv ON dv.id = dl.deliverable_id
+      JOIN project_departments pd ON pd.id = dv.project_department_id
+      JOIN visible v ON v.id = dv.project_id
+      WHERE pd.department_id = d.id
+        AND dl.approved_at > now() - make_interval(days => ${ON_TIME_WINDOW_DAYS})
+    ) t ON true
     WHERE d.is_production AND d.is_active ${departmentFilter}
     ORDER BY d.sort_order
   `);
-  const departments: DepartmentSummary[] = departmentRows.map((r) => ({
-    departmentId: Number(r.id), name: r.name, activeProjects: Number(r.active_projects),
-    openSlots: Number(r.open_slots), inQa: Number(r.in_qa), approved: Number(r.approved),
-    reviews: Number(r.reviews), rejected: Number(r.rejected),
-  }));
+  const departments: DepartmentSummary[] = departmentRows.map((r) => {
+    const onTimeMeasured = Number(r.on_time_measured);
+    const onTime = Number(r.on_time);
+    return {
+      departmentId: Number(r.id), name: r.name, activeProjects: Number(r.active_projects),
+      openSlots: Number(r.open_slots), inQa: Number(r.in_qa), approved: Number(r.approved),
+      reviews: Number(r.reviews), rejected: Number(r.rejected),
+      throughput: Number(r.throughput), onTimeMeasured, onTime,
+      onTimeRate: onTimeMeasured === 0 ? null : Math.round((onTime / onTimeMeasured) * 100),
+    };
+  });
 
   const workloadDepartments = isExecutive || actor.role === 'sales' ? [] : departments;
   // Teams with nobody in them have no workload to show.
@@ -258,6 +309,11 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
     const [row] = await db.execute<Record<string, number>>(sql`
       SELECT (SELECT count(*)::int FROM assignments a JOIN projects p ON p.id = a.project_id
                WHERE a.assignee_id = ${actor.id} AND a.status NOT IN ('completed','cancelled')
+                 AND p.status NOT IN ('completed','cancelled')
+                 AND a.start_date IS NOT NULL AND a.start_date <= current_date
+                 AND (a.end_date IS NULL OR a.end_date >= current_date)) AS today_assignments,
+             (SELECT count(*)::int FROM assignments a JOIN projects p ON p.id = a.project_id
+               WHERE a.assignee_id = ${actor.id} AND a.status NOT IN ('completed','cancelled')
                  AND p.status NOT IN ('completed','cancelled')) AS active_assignments,
              (SELECT count(DISTINCT a.project_id)::int FROM assignments a JOIN projects p ON p.id = a.project_id
                WHERE a.assignee_id = ${actor.id} AND a.status NOT IN ('completed','cancelled')
@@ -273,6 +329,7 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
       ) s
     `);
     executive = {
+      todayAssignments: Number(row?.today_assignments ?? 0),
       activeAssignments: Number(row?.active_assignments ?? 0),
       currentProjects: Number(row?.current_projects ?? 0),
       pendingDeliverables: Number(row?.pending ?? 0),

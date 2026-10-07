@@ -14,7 +14,7 @@ import { after, before, describe, test } from 'node:test';
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import postgres from 'postgres';
-import { clientScope, projectScope } from '../src/lib/authz/scope';
+import { clientScope, projectScope, type ScopeOptions } from '../src/lib/authz/scope';
 import type { Actor, Permission, Role } from '../src/lib/authz/types';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -49,20 +49,20 @@ function actor(role: Role, over: Partial<Actor> = {}): Actor {
  * that already contains data. Within that universe both directions are still
  * proven exactly: what the actor sees, and what they do not.
  */
-async function visibleProjects(a: Actor): Promise<string[]> {
+async function visibleProjects(a: Actor, options?: ScopeOptions): Promise<string[]> {
   const q = dialect.sqlToQuery(
     sql`SELECT project_code FROM projects
-        WHERE ${projectScope(a)} AND project_code LIKE 'TEST-%'
+        WHERE ${projectScope(a, 'projects', options)} AND project_code LIKE 'TEST-%'
         ORDER BY project_code`,
   );
   const rows = await db.unsafe<{ project_code: string }[]>(q.sql, q.params as never[]);
   return rows.map((r) => r.project_code);
 }
 
-async function visibleClients(a: Actor): Promise<string[]> {
+async function visibleClients(a: Actor, options?: ScopeOptions): Promise<string[]> {
   const q = dialect.sqlToQuery(
     sql`SELECT name FROM clients
-        WHERE ${clientScope(a)} AND name LIKE 'Policy Test %'
+        WHERE ${clientScope(a, 'clients', options)} AND name LIKE 'Policy Test %'
         ORDER BY name`,
   );
   const rows = await db.unsafe<{ name: string }[]>(q.sql, q.params as never[]);
@@ -107,6 +107,7 @@ before(async () => {
   };
   await mkClient('abc', 'Policy Test ABC', ids.salesA);
   await mkClient('xyz', 'Policy Test XYZ', ids.salesB);
+  await mkClient('fresh', 'Policy Test NEW', ids.salesB);
 
   const mkMonth = async (key: string, clientId: number, owner: number) => {
     const row = await one(`
@@ -116,6 +117,7 @@ before(async () => {
   };
   await mkMonth('monthAbc', ids.abc, ids.salesA);
   await mkMonth('monthXyz', ids.xyz, ids.salesB);
+  await mkMonth('monthFresh', ids.fresh, ids.salesB);
 
   const mkProject = async (
     key: string, code: string, clientId: number, monthId: number, owner: number,
@@ -131,17 +133,21 @@ before(async () => {
   await mkProject('p2', 'TEST-0002', ids.xyz, ids.monthXyz, ids.salesB);
   // P3: ABC, SEO only.
   await mkProject('p3', 'TEST-0003', ids.abc, ids.monthAbc, ids.salesA);
+  // P4: a new client's first order, just filed. Sales ticked Video; the PM
+  // has not routed it to a lead yet (§4, §5).
+  await mkProject('p4', 'TEST-0004', ids.fresh, ids.monthFresh, ids.salesB);
 
-  const mkPd = async (key: string, projectId: number, deptId: number, lead: number) => {
+  const mkPd = async (key: string, projectId: number, deptId: number, lead: number | null) => {
     const row = await one(`
       INSERT INTO project_departments (project_id, department_id, team_lead_id)
-      VALUES (${projectId}, ${deptId}, ${lead}) RETURNING id`);
+      VALUES (${projectId}, ${deptId}, ${lead ?? 'NULL'}) RETURNING id`);
     ids[key] = Number(row.id);
   };
   await mkPd('p1video', ids.p1, ids.video, ids.leadVideo);
   await mkPd('p1design', ids.p1, ids.design, ids.leadDesign);
   await mkPd('p2video', ids.p2, ids.video, ids.leadVideo);
   await mkPd('p3seo', ids.p3, ids.seo, ids.leadVideo);
+  await mkPd('p4video', ids.p4, ids.video, null);
 
   const mkAssignment = async (pdKey: string, projectKey: string, assignee: number) => {
     await db.unsafe(`
@@ -163,13 +169,13 @@ after(async () => {
 describe('project visibility (brief §23)', { skip }, () => {
   test('CEO sees every project', async () => {
     assert.deepEqual(await visibleProjects(actor('ceo', { id: ids.ceo })), [
-      'TEST-0001', 'TEST-0002', 'TEST-0003',
+      'TEST-0001', 'TEST-0002', 'TEST-0003', 'TEST-0004',
     ]);
   });
 
   test('Project Manager sees every project, across all departments (§6)', async () => {
     assert.deepEqual(await visibleProjects(actor('project_manager', { id: ids.pm })), [
-      'TEST-0001', 'TEST-0002', 'TEST-0003',
+      'TEST-0001', 'TEST-0002', 'TEST-0003', 'TEST-0004',
     ]);
   });
 
@@ -177,16 +183,33 @@ describe('project visibility (brief §23)', { skip }, () => {
     assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesA })), [
       'TEST-0001', 'TEST-0003',
     ]);
-    assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesB })), ['TEST-0002']);
+    assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesB })), ['TEST-0002', 'TEST-0004']);
   });
 
   test('a Team Lead sees projects with work in the departments they lead', async () => {
     const video = actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video] });
     // P2 has no assignments yet — a lead must still see it in order to plan it.
+    // P4 is not theirs yet: Sales ticked Video, but the PM has not routed it.
     assert.deepEqual(await visibleProjects(video), ['TEST-0001', 'TEST-0002']);
 
     const design = actor('team_lead', { id: ids.leadDesign, leadDepartmentIds: [ids.design] });
     assert.deepEqual(await visibleProjects(design), ['TEST-0001']);
+  });
+
+  test('a Team Lead sees a project once the PM routes it to their team, not before (§4, §5)', async () => {
+    const video = actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video] });
+    // Another lead of the same department: the team is theirs too (§6, §23).
+    const coLead = actor('team_lead', { id: ids.leadDesign, leadDepartmentIds: [ids.video] });
+    assert.ok(!(await visibleProjects(video)).includes('TEST-0004'), 'unrouted: in the PM’s intake');
+    assert.ok(!(await visibleProjects(coLead)).includes('TEST-0004'));
+
+    await db.unsafe(`UPDATE project_departments SET team_lead_id = ${ids.leadVideo} WHERE id = ${ids.p4video}`);
+    try {
+      assert.deepEqual(await visibleProjects(video), ['TEST-0001', 'TEST-0002', 'TEST-0004']);
+      assert.ok((await visibleProjects(coLead)).includes('TEST-0004'), 'a co-lead shares the team');
+    } finally {
+      await db.unsafe(`UPDATE project_departments SET team_lead_id = NULL WHERE id = ${ids.p4video}`);
+    }
   });
 
   test('a Team Lead leading two departments sees the union', async () => {
@@ -248,7 +271,7 @@ describe('scope fragments work under a table alias', { skip }, () => {
       WHERE ${clientScope(sales, 'c')} AND c.name LIKE 'Policy Test %'
       ORDER BY c.name`);
     const rows = await db.unsafe<{ name: string }[]>(q.sql, q.params as never[]);
-    assert.deepEqual(rows.map((r) => r.name), ['Policy Test XYZ']);
+    assert.deepEqual(rows.map((r) => r.name), ['Policy Test NEW', 'Policy Test XYZ']);
   });
 
   test('an unsafe alias is refused outright', () => {
@@ -259,7 +282,9 @@ describe('scope fragments work under a table alias', { skip }, () => {
 describe('client visibility (brief §31, §33)', { skip }, () => {
   test('Sales sees their own clients only', async () => {
     assert.deepEqual(await visibleClients(actor('sales', { id: ids.salesA })), ['Policy Test ABC']);
-    assert.deepEqual(await visibleClients(actor('sales', { id: ids.salesB })), ['Policy Test XYZ']);
+    assert.deepEqual(await visibleClients(actor('sales', { id: ids.salesB })), [
+      'Policy Test NEW', 'Policy Test XYZ',
+    ]);
   });
 
   test('the view_all_clients grant widens Sales to every client', async () => {
@@ -267,15 +292,26 @@ describe('client visibility (brief §31, §33)', { skip }, () => {
       id: ids.salesA,
       permissions: new Set<Permission>(['view_all_clients']),
     });
-    assert.deepEqual(await visibleClients(widened), ['Policy Test ABC', 'Policy Test XYZ']);
+    assert.deepEqual(await visibleClients(widened), ['Policy Test ABC', 'Policy Test NEW', 'Policy Test XYZ']);
   });
 
   test('a Team Lead reaches a client through their department’s work', async () => {
     const video = actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video] });
+    // NEW's only project is still in intake, so it is no team's client yet.
     assert.deepEqual(await visibleClients(video), ['Policy Test ABC', 'Policy Test XYZ']);
 
     const design = actor('team_lead', { id: ids.leadDesign, leadDepartmentIds: [ids.design] });
     assert.deepEqual(await visibleClients(design), ['Policy Test ABC']);
+  });
+
+  test('a Team Lead reaches a client once its work is routed to them (§4, §5)', async () => {
+    const video = actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video] });
+    await db.unsafe(`UPDATE project_departments SET team_lead_id = ${ids.leadVideo} WHERE id = ${ids.p4video}`);
+    try {
+      assert.deepEqual(await visibleClients(video), ['Policy Test ABC', 'Policy Test NEW', 'Policy Test XYZ']);
+    } finally {
+      await db.unsafe(`UPDATE project_departments SET team_lead_id = NULL WHERE id = ${ids.p4video}`);
+    }
   });
 
   test('an Executive reaches only clients they have worked for', async () => {
@@ -289,5 +325,73 @@ describe('client visibility (brief §31, §33)', { skip }, () => {
 
   test('a deactivated user reaches no client', async () => {
     assert.deepEqual(await visibleClients(actor('ceo', { id: ids.ceo, isActive: false })), []);
+  });
+});
+
+describe('a project shared with a Sales rep (brief §23: “authorized to view”)', { skip }, () => {
+  const share = (projectKey: string, userKey: string) => db.unsafe(`
+    INSERT INTO project_viewers (project_id, user_id, granted_by)
+    VALUES (${ids[projectKey]}, ${ids[userKey]}, ${ids.ceo})`);
+  const revoke = (projectKey: string, userKey: string) => db.unsafe(`
+    DELETE FROM project_viewers WHERE project_id = ${ids[projectKey]} AND user_id = ${ids[userKey]}`);
+  const reading: ScopeOptions = { shared: true };
+
+  test('the rep reads the project and, through it, its client', async () => {
+    const salesA = actor('sales', { id: ids.salesA });
+    await share('p2', 'salesA');
+    try {
+      assert.deepEqual(await visibleProjects(salesA, reading), ['TEST-0001', 'TEST-0002', 'TEST-0003']);
+      assert.deepEqual(await visibleClients(salesA, reading), ['Policy Test ABC', 'Policy Test XYZ']);
+      // …but not the rest of that client's book.
+      assert.ok(!(await visibleProjects(salesA, reading)).includes('TEST-0004'));
+    } finally {
+      await revoke('p2', 'salesA');
+    }
+  });
+
+  test('a rep it was not shared with sees nothing more', async () => {
+    await share('p2', 'salesA');
+    try {
+      assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesB }), reading), ['TEST-0002', 'TEST-0004']);
+      assert.deepEqual(await visibleClients(actor('sales', { id: ids.salesB }), reading), [
+        'Policy Test NEW', 'Policy Test XYZ',
+      ]);
+    } finally {
+      await revoke('p2', 'salesA');
+    }
+  });
+
+  test('a share is only for reading: the default scope, which every change and own-book count uses, leaves it out', async () => {
+    const salesA = actor('sales', { id: ids.salesA });
+    await share('p2', 'salesA');
+    try {
+      assert.deepEqual(await visibleProjects(salesA), ['TEST-0001', 'TEST-0003']);
+      assert.deepEqual(await visibleClients(salesA), ['Policy Test ABC']);
+      assert.deepEqual(await visibleProjects(salesA, { shared: false }), ['TEST-0001', 'TEST-0003']);
+      // A rep's own work is the same either way.
+      assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesB })), ['TEST-0002', 'TEST-0004']);
+    } finally {
+      await revoke('p2', 'salesA');
+    }
+  });
+
+  test('taking the share back takes the project and the client with it', async () => {
+    const salesA = actor('sales', { id: ids.salesA });
+    await share('p2', 'salesA');
+    await revoke('p2', 'salesA');
+    assert.deepEqual(await visibleProjects(salesA, reading), ['TEST-0001', 'TEST-0003']);
+    assert.deepEqual(await visibleClients(salesA, reading), ['Policy Test ABC']);
+  });
+
+  test('a share opens nothing to other roles, or to a deactivated rep', async () => {
+    await share('p2', 'execOmar');
+    await share('p2', 'salesA');
+    try {
+      assert.deepEqual(await visibleProjects(actor('executive', { id: ids.execOmar }), reading), ['TEST-0003']);
+      assert.deepEqual(await visibleProjects(actor('sales', { id: ids.salesA, isActive: false }), reading), []);
+    } finally {
+      await revoke('p2', 'execOmar');
+      await revoke('p2', 'salesA');
+    }
   });
 });

@@ -1,18 +1,23 @@
 import Link from 'next/link';
 import { requireActor } from '@/lib/auth/dal';
 import { AppShell } from '@/components/app-shell';
-import { inbox, upcomingDeadlines } from '@/lib/notifications/inbox';
+import { INBOX_DEADLINE_DAYS, inbox, upcomingDeadlines } from '@/lib/notifications/inbox';
 import { formatDateTime } from '@/lib/workspace/format';
 import { markAllNotificationsRead, markNotificationRead } from './actions';
 
 /**
  * The inbox (brief §20): what happened that concerns this person, newest
  * first, plus the deadlines coming up — computed now, not stored, so the
- * list is always current.
+ * list is always current. The nightly run also stores a reminder as an item
+ * comes within three days, falls due and goes overdue (reminders.ts); that
+ * row is the message, and the Deadlines list is where the item stands now,
+ * so the same item can appear in both until the reminder is read.
  */
 export default async function NotificationsPage() {
   const actor = await requireActor();
-  const [items, deadlines] = await Promise.all([inbox(actor, { limit: 100 }), upcomingDeadlines(actor, 3)]);
+  const [items, deadlines] = await Promise.all([
+    inbox(actor, { limit: 100 }), upcomingDeadlines(actor, INBOX_DEADLINE_DAYS),
+  ]);
   const unread = items.filter((i) => !i.isRead);
   const read = items.filter((i) => i.isRead);
 
@@ -23,6 +28,7 @@ export default async function NotificationsPage() {
           <h1 className="text-lg font-semibold tracking-tight">Inbox</h1>
           <p className="mt-1 text-sm text-muted">
             {unread.length === 0 ? 'Nothing unread.' : `${unread.length} unread.`}
+            {' '}<Link href="/settings/notifications" className="underline-offset-2 hover:underline">Email, Slack and WhatsApp settings</Link>
           </p>
         </div>
         {unread.length > 0 ? (
@@ -43,11 +49,11 @@ export default async function NotificationsPage() {
                     : d.daysLeft === 0 ? 'Due today'
                     : `Due in ${d.daysLeft} day${d.daysLeft === 1 ? '' : 's'}`}
                 </span>
-                <Link href={`/projects/${d.projectId}${d.kind === 'assignment' ? '#workspace' : ''}`} className="hover:underline">
+                <Link href={d.linkPath} className="hover:underline">
                   {d.title}
                 </Link>
                 <span className="font-mono text-xs text-muted">{d.projectCode}</span>
-                <span className="ml-auto text-xs text-muted">{d.kind === 'assignment' ? 'assignment' : 'project'} · {d.due}</span>
+                <span className="ml-auto text-xs text-muted">{d.kind} · {d.due}</span>
               </li>
             ))}
           </ul>

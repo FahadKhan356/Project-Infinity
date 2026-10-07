@@ -1,7 +1,9 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { assignWork, type PlanningFormState } from '../actions';
+import { PendingAttachments, uploadPending } from '@/components/files/pending-attachments';
 
 const initial: PlanningFormState = {};
 const field =
@@ -10,16 +12,41 @@ const field =
 interface Props {
   projectDepartmentId: number;
   members: { id: number; name: string; openSlots: number }[];
+  /** The top suggestion (brief §29), preselected; the lead may choose anyone. */
+  suggestedId?: number | null;
   defaultBaseName: string;
   remaining: number;
   deadline: string | null;
 }
 
 export function AssignPanel({
-  projectDepartmentId, members, defaultBaseName, remaining, deadline,
+  projectDepartmentId, members, defaultBaseName, remaining, deadline, suggestedId = null,
 }: Props) {
+  const router = useRouter();
   const [state, formAction, pending] = useActionState(assignWork, initial);
   const [count, setCount] = useState(remaining > 0 ? remaining : 1);
+  const [files, setFiles] = useState<File[]>([]);
+  const [attaching, setAttaching] = useState('');
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  // References chosen with the assignment go on it once it exists (§7).
+  const created = state.created;
+  useEffect(() => {
+    if (!created || files.length === 0) return;
+    let cancelled = false;
+    void uploadPending(
+      files,
+      { target: 'attachment', projectId: created.projectId, assignmentId: created.assignmentId, purpose: 'reference' },
+      setAttaching,
+    ).then((outcome) => {
+      if (cancelled) return;
+      setFiles([]);
+      setAttachError(outcome.failed ? `Assigned, but ${outcome.failed}` : null);
+      router.refresh();
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per assignment made
+  }, [created]);
 
   if (members.length === 0) {
     return (
@@ -51,7 +78,7 @@ export function AssignPanel({
           </div>
           <div>
             <label className="block text-sm font-medium" htmlFor="assigneeId">Executive</label>
-            <select id="assigneeId" name="assigneeId" required className={field} defaultValue="">
+            <select id="assigneeId" name="assigneeId" required className={field} defaultValue={suggestedId ?? ''}>
               <option value="" disabled>Choose a team member…</option>
               {members.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -62,7 +89,7 @@ export function AssignPanel({
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+        <div className="mt-4 grid gap-4 sm:grid-cols-4">
           <div>
             <label className="block text-sm font-medium" htmlFor="startDate">Start</label>
             <input id="startDate" name="startDate" type="date" className={field} />
@@ -79,6 +106,11 @@ export function AssignPanel({
               <option value="high">High</option>
               <option value="urgent">Urgent</option>
             </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium" htmlFor="estimatedHours">Estimated hours</label>
+            <input id="estimatedHours" name="estimatedHours" inputMode="decimal" placeholder="optional"
+              className={field} />
           </div>
         </div>
 
@@ -112,6 +144,21 @@ export function AssignPanel({
         </label>
         <textarea id="instructions" name="instructions" rows={3} className={field} />
 
+        <div className="mt-4">
+          <PendingAttachments
+            files={files}
+            onChange={setFiles}
+            disabled={pending || attaching !== ''}
+            label="References"
+            hint="Briefs, examples, brand files — attached to this assignment for whoever does the work."
+          />
+        </div>
+
+        {attachError ? (
+          <p role="alert" className="mt-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+            {attachError} Add it from the project workspace.
+          </p>
+        ) : null}
         {state.error ? (
           <p role="alert" className="mt-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {state.error}
@@ -121,9 +168,9 @@ export function AssignPanel({
           <p role="status" className="mt-4 rounded-md bg-accent/10 px-3 py-2 text-sm">{state.notice}</p>
         ) : null}
 
-        <button type="submit" disabled={pending}
-          className="mt-6 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-60">
-          {pending ? 'Assigning…' : `Assign${count > 0 ? ` with ${count} slot${count === 1 ? '' : 's'}` : ''}`}
+        <button type="submit" disabled={pending || attaching !== ''}
+          className="mt-4 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-60">
+          {pending ? 'Assigning…' : attaching || `Assign${count > 0 ? ` with ${count} slot${count === 1 ? '' : 's'}` : ''}`}
         </button>
       </form>
     </section>

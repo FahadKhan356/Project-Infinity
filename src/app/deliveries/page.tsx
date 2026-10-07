@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { FileLink } from '@/components/files/file-link';
+import { FilePreview } from '@/components/files/file-preview';
 import { requireActor } from '@/lib/auth/dal';
 import { AccessDenied } from '@/components/access-denied';
 import { AppShell } from '@/components/app-shell';
@@ -11,10 +13,12 @@ import { DeliveryForm } from './delivery-form';
  * Sales → Deliveries (brief §14). Everything that has cleared QA, with the
  * file, the version, who approved it and what the client said. The portal
  * records that a person delivered the file; it does not send it (§14, v1).
+ * The Project Manager reads the same list (§5, §23); only Sales marks it.
  */
 export default async function DeliveriesPage(props: PageProps<'/deliveries'>) {
   const actor = await requireActor();
-  if (!can(actor, 'delivery.manage')) {
+  const canDownload = can(actor, 'files.download');
+  if (!can(actor, 'delivery.view')) {
     return (
       <AppShell actor={actor}>
         <AccessDenied what="client deliveries" />
@@ -33,6 +37,7 @@ export default async function DeliveriesPage(props: PageProps<'/deliveries'>) {
           <h1 className="text-lg font-semibold tracking-tight">Deliveries</h1>
           <p className="mt-1 max-w-prose text-sm text-muted">
             Approved deliverables waiting to go to the client, and what came back.
+            {can(actor, 'delivery.manage') ? '' : ' Sales records each delivery; you see the list read-only.'}
           </p>
         </div>
         <Link href={includeCompleted ? '/deliveries' : '/deliveries?all=1'} className="text-sm text-muted hover:underline">
@@ -71,34 +76,65 @@ export default async function DeliveriesPage(props: PageProps<'/deliveries'>) {
               <div className="grid gap-5 px-5 py-4 lg:grid-cols-[1fr_1fr_18rem]">
                 <div className="text-sm">
                   <div className="text-xs font-medium uppercase tracking-wide text-muted">File</div>
-                  <a href={d.downloadUrl} className="mt-1 inline-block font-medium hover:underline">{d.originalFilename}</a>
+                  <FileLink href={d.downloadUrl} filename={d.originalFilename} canDownload={canDownload}
+                    className="mt-1 inline-block font-medium hover:underline" />
                   <div className="text-xs text-muted">v{d.versionNo} · {formatBytes(d.sizeBytes)}</div>
+                  <FilePreview url={d.downloadUrl} filename={d.originalFilename} />
                 </div>
                 <div className="text-sm">
                   <div className="text-xs font-medium uppercase tracking-wide text-muted">QA</div>
                   <div className="mt-1 text-xs text-muted">approved {formatDateTime(d.approvedAt)}</div>
-                  {d.qaComments ? <p className="mt-1 whitespace-pre-wrap text-xs">{d.qaComments}</p> : null}
+                  {d.qaApprovals.length > 0 ? (
+                    <ul className="mt-1 space-y-1">
+                      {d.qaApprovals.map((a, i) => (
+                        <li key={`${i}-${a.stage}`} className="text-xs">
+                          <span className="text-muted">
+                            {a.stage === 'team_lead' ? 'Team Lead' : 'Project Manager'} · {a.reviewer} · {formatDateTime(a.at)}
+                          </span>
+                          {a.comments ? <p className="whitespace-pre-wrap">{a.comments}</p> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                   {d.deliveredAt ? (
                     <div className="mt-2 text-xs text-muted">
                       delivered {formatDateTime(d.deliveredAt)}{d.deliveredBy ? ` by ${d.deliveredBy}` : ''}
                     </div>
                   ) : null}
+                  {d.clientDecision ? (
+                    <p className="mt-2 text-xs font-medium">
+                      {d.clientDecision.decision === 'approved' ? 'Approved' : 'Changes requested'} in the portal by{' '}
+                      {d.clientDecision.by}, {formatDateTime(d.clientDecision.at)}
+                    </p>
+                  ) : null}
                   {d.clientFeedback ? (
                     <p className="mt-2 whitespace-pre-wrap text-xs"><span className="text-muted">Client: </span>{d.clientFeedback}</p>
                   ) : null}
-                  {can(actor, 'revisions.create') && (d.status === 'delivered' || d.status === 'client_feedback_received') ? (
+                  {d.canRevise && (d.status === 'delivered' || d.status === 'client_feedback_received') ? (
                     <Link href={`/projects/${d.projectId}/revisions/new?deliverable=${d.deliverableId}`}
                       className="mt-2 inline-block text-xs font-medium text-accent hover:underline">
                       Open a revision on this file →
                     </Link>
                   ) : null}
                 </div>
-                <DeliveryForm
-                  deliveryId={d.deliveryId}
-                  next={[...DELIVERY_TRANSITIONS[d.status]]}
-                  notes={d.notes}
-                  clientFeedback={d.clientFeedback}
-                />
+                {d.canUpdate ? (
+                  <DeliveryForm
+                    deliveryId={d.deliveryId}
+                    status={d.status}
+                    next={[...DELIVERY_TRANSITIONS[d.status]]}
+                    notes={d.notes}
+                    clientFeedback={d.clientFeedback}
+                  />
+                ) : (
+                  <div className="text-xs">
+                    {d.notes ? (
+                      <p className="whitespace-pre-wrap"><span className="text-muted">Notes: </span>{d.notes}</p>
+                    ) : null}
+                    <p className={`text-muted ${d.notes ? 'mt-2' : ''}`}>
+                      Read-only. The project’s Sales rep records delivery.
+                    </p>
+                  </div>
+                )}
               </div>
             </li>
           ))}

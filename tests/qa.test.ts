@@ -388,7 +388,11 @@ describe('Sales delivery panel (brief §14)', { skip }, () => {
     assert.equal(item.originalFilename, 'Video_01_v3.mp4');
     assert.equal(item.versionNo, 3);
     assert.equal(item.status, 'pending_delivery');
-    assert.equal(item.qaComments, 'Approved for delivery.');
+    // Both sign-offs on v3 reach Sales, oldest first — not only the last (§12, §14).
+    assert.deepEqual(
+      item.qaApprovals.map((a) => [a.stage, a.reviewer, a.comments]),
+      [['team_lead', 'leadVideo', 'Good to go.'], ['project_manager', 'pm', 'Approved for delivery.']],
+    );
     assert.ok(item.approvedAt);
     assert.match(item.downloadUrl, /^\/api\/files\//);
   });
@@ -436,9 +440,9 @@ describe('Sales delivery panel (brief §14)', { skip }, () => {
 });
 
 describe('project status follows the work (brief §18, §26)', { skip }, () => {
-  test('approved everywhere → ready for delivery → delivered → completed', async () => {
+  test('in QA → ready for delivery → delivered → completed', async () => {
     await upload(ahmed(), ids.reel01, 'Reel.mp4');
-    assert.equal(await projectStatus(ids.soloProject), 'in_progress');
+    assert.equal(await projectStatus(ids.soloProject), 'qa', 'its only slot is waiting for QA');
 
     const approved = await reviewDeliverable(leadVideo(), { deliverableId: ids.reel01, decision: 'approved' });
     assert.equal(approved.newStatus, 'approved', 'no PM QA on this project');
@@ -492,5 +496,12 @@ describe('the activity feed (brief §25)', { skip }, () => {
       'pm approved Video 01 v2',
       'sales delivered Video 01 to the client',
     ]);
+  });
+
+  test('a long feed keeps its newest lines, not its oldest', async () => {
+    const full = await projectActivity(ids.project);
+    const tail = await projectActivity(ids.project, { limit: 2 });
+    assert.deepEqual(tail.map((e) => e.text), full.slice(-2).map((e) => e.text));
+    assert.equal(tail[1].text, 'sales delivered Video 01 to the client');
   });
 });

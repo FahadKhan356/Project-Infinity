@@ -106,6 +106,9 @@ before(async () => {
       }
 
       const c = alter?.def?.Constraint;
+      if (c?.contype === 'CONSTR_UNIQUE' || c?.contype === 'CONSTR_PRIMARY') {
+        addUnique(table, (c.keys ?? []).map((k: any) => k.String.sval));
+      }
       if (c?.contype === 'CONSTR_FOREIGN') {
         foreignKeys.push({
           table,

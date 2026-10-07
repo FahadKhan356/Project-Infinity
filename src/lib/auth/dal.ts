@@ -3,9 +3,10 @@ import { cache } from 'react';
 import { redirect } from 'next/navigation';
 import { and, eq, gt } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { departmentMembers, sessions, userPermissions, users } from '@/db/schema';
-import type { Actor, Permission, Role } from '@/lib/authz';
+import { sessions, users } from '@/db/schema';
+import type { Actor } from '@/lib/authz';
 import { readSessionToken } from './session';
+import { actorFor } from './actor';
 
 /**
  * The data access layer. Every page, server action and route handler resolves
@@ -28,6 +29,7 @@ export const getActor = cache(async (): Promise<Actor | null> => {
       role: users.role,
       isActive: users.isActive,
       mustChangePassword: users.mustChangePassword,
+      clientId: users.clientId,
     })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
@@ -39,28 +41,7 @@ export const getActor = cache(async (): Promise<Actor | null> => {
   // for the cookie to expire.
   if (!user || !user.isActive) return null;
 
-  const [memberships, grants] = await Promise.all([
-    db
-      .select({ departmentId: departmentMembers.departmentId, isLead: departmentMembers.isLead })
-      .from(departmentMembers)
-      .where(eq(departmentMembers.userId, user.id)),
-    db
-      .select({ permission: userPermissions.permission })
-      .from(userPermissions)
-      .where(eq(userPermissions.userId, user.id)),
-  ]);
-
-  return {
-    id: user.id,
-    email: user.email,
-    fullName: user.fullName,
-    role: user.role as Role,
-    isActive: user.isActive,
-    mustChangePassword: user.mustChangePassword,
-    departmentIds: memberships.map((m) => m.departmentId),
-    leadDepartmentIds: memberships.filter((m) => m.isLead).map((m) => m.departmentId),
-    permissions: new Set(grants.map((g) => g.permission as Permission)),
-  };
+  return actorFor(user);
 });
 
 /**
@@ -71,7 +52,19 @@ export async function requireActor(): Promise<Actor> {
   const actor = await getActor();
   if (!actor) redirect('/login');
   if (actor.mustChangePassword) redirect('/change-password');
+  // Every internal page and server action comes through here. A client
+  // login never gets past it: its whole world is /portal (brief §29).
+  if (actor.role === 'client') redirect('/portal');
   return actor;
+}
+
+/** For /portal: a signed-in client login with its client, or away. */
+export async function requireClientActor(): Promise<Actor & { clientId: number }> {
+  const actor = await getActor();
+  if (!actor) redirect('/login');
+  if (actor.mustChangePassword) redirect('/change-password');
+  if (actor.role !== 'client' || !actor.clientId) redirect('/dashboard');
+  return actor as Actor & { clientId: number };
 }
 
 /**
@@ -83,3 +76,4 @@ export async function requireActorAllowingPasswordChange(): Promise<Actor> {
   if (!actor) redirect('/login');
   return actor;
 }
+

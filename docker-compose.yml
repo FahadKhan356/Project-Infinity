@@ -26,6 +26,8 @@ services:
     build:
       context: .
       target: migrator
+    # Named so `sweep` below runs the same, current build without its own.
+    image: aktivacity-portal-migrator
     environment:
       DATABASE_URL: ${DATABASE_URL}
     depends_on:
@@ -57,11 +59,28 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      # Only Caddy reaches the app, and only over HTTPS: the session cookie
+      # is always Secure here (src/lib/auth/cookie-policy.ts).
+      SESSION_COOKIE_SECURE: "true"
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
       STORAGE_ROOT: /storage
+      # Which optional channels are connected, for the settings page (brief §29).
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_TEMPLATE: ${WHATSAPP_TEMPLATE:-}
+      # Optional AI project summaries (brief §29). Unset = off; nothing leaves the building.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
     volumes:
+      # The file store, and under /storage/jobs the records the scheduled
+      # jobs leave (written by `scheduler`) for the dashboard and /api/health.
       - storage:/storage
+      # Backup health for the app to report (written by `backup`).
+      - ./backups/status:/backups/status:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +94,163 @@ services:
       start_period: 20s
     expose:
       - "3000"
+
+  # Nightly pg_dump + restic off-box copy, weekly restore rehearsal.
+  # See docs/runbook.md, "Backup". One-off: `docker compose run --rm backup backup-now`
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: ${BACKUP_TZ:-UTC}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-30 2 * * *}
+      VERIFY_SCHEDULE: ${VERIFY_SCHEDULE:-30 4 * * 0}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_MIN: ${BACKUP_KEEP_MIN:-7}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      # The explicit opt-out from file backups (brief §44): 1 = database dumps
+      # only, on purpose. Without it a run with no RESTIC_REPOSITORY fails.
+      BACKUP_FILES_DISABLED: ${BACKUP_FILES_DISABLED:-}
+      # Optional cloud storage for the off-site copy (brief §29): set
+      # RESTIC_REPOSITORY to s3:… or b2:… and the matching keys below.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      B2_ACCOUNT_ID: ${B2_ACCOUNT_ID:-}
+      B2_ACCOUNT_KEY: ${B2_ACCOUNT_KEY:-}
+      RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-7}
+      RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-4}
+      RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
+      RESTIC_CHECK_SUBSET: ${RESTIC_CHECK_SUBSET:-2%}
+    volumes:
+      - ./backups:/backups
+      - storage:/storage:ro
+      # The off-box target: set BACKUP_REPO_HOST_DIR to the host path where
+      # the NAS / second disk is mounted and use RESTIC_REPOSITORY=/repo. The
+      # fallback ./backups/restic-NOT-OFFSITE is on THIS box's disk (a bind
+      # mount needs a source): a repository there is reported degraded,
+      # backup.sh refuses to create one, and it is not a backup.
+      - ${BACKUP_REPO_HOST_DIR:-./backups/restic-NOT-OFFSITE}:/repo
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The nightly jobs on a schedule, so a Compose deployment needs no host
+  # cron (docs/runbook.md, "Scheduled jobs"): the retention sweep at 02:00,
+  # the recurring projects at 02:15 and the nightly housekeeping at 02:20 —
+  # all before the 02:30 backup, and in BACKUP_TZ like it. busybox crond in
+  # the migrator image (docker/scheduler/entrypoint.sh), not the app image:
+  # the runner carries neither tsx nor scripts/. Each run is recorded under
+  # /storage/jobs for the dashboard and /api/health. One-off, now:
+  #   docker compose run --rm scheduler nightly-now      (also sweep-now,
+  #   recurring-now; each accepts --dry-run)
+  # Needs the migrator image built: `docker compose up -d --build` does it.
+  scheduler:
+    image: aktivacity-portal-migrator
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    entrypoint: ["sh", "docker/scheduler/entrypoint.sh"]
+    command: ["cron"]
+    environment:
+      TZ: ${BACKUP_TZ:-UTC}
+      DATABASE_URL: ${DATABASE_URL}
+      STORAGE_ROOT: /storage
+      FILE_RETENTION_DAYS: ${FILE_RETENTION_DAYS:-30}
+      SWEEP_SCHEDULE: ${SWEEP_SCHEDULE:-0 2 * * *}
+      RECURRING_SCHEDULE: ${RECURRING_SCHEDULE:-15 2 * * *}
+      NIGHTLY_SCHEDULE: ${NIGHTLY_SCHEDULE:-20 2 * * *}
+    volumes:
+      - storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Retention sweep (scripts/sweep-files.ts): purges soft-deleted files past
+  # the retention window. The `scheduler` runs it nightly before the backup,
+  # so purged bytes stop being copied; this is the one-off
+  # (`docker compose run --rm scheduler sweep-now` does the same):
+  #   docker compose --profile ops run --rm sweep
+  # The runner image has no tsx or scripts/; the migrator image has both.
+  sweep:
+    image: aktivacity-portal-migrator
+    pull_policy: never
+    profiles: ["ops"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      STORAGE_ROOT: /storage
+    volumes:
+      - storage:/storage
+    command: ["npx", "tsx", "scripts/sweep-files.ts", "--retention-days", "${FILE_RETENTION_DAYS:-30}"]
+    restart: "no"
+
+  # Recurring projects (scripts/run-recurring.ts): files each month's copy of
+  # every order marked "repeats every month". Idempotent; the `scheduler`
+  # runs it nightly, this is the one-off (it records its run under
+  # /storage/jobs like the scheduled one):
+  #   docker compose --profile ops run --rm recurring
+  recurring:
+    image: aktivacity-portal-migrator
+    pull_policy: never
+    profiles: ["ops"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      STORAGE_ROOT: /storage
+    volumes:
+      - storage:/storage
+    command: ["npm", "run", "projects:recurring"]
+    restart: "no"
+
+  # Nightly housekeeping (scripts/nightly.ts): stored deadline reminders
+  # (brief §20) and the month archive (§36). Idempotent; the `scheduler`
+  # runs it nightly after `recurring`, this is the one-off (it records its
+  # run under /storage/jobs like the scheduled one):
+  #   docker compose --profile ops run --rm nightly
+  nightly:
+    image: aktivacity-portal-migrator
+    pull_policy: never
+    profiles: ["ops"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      STORAGE_ROOT: /storage
+    volumes:
+      - storage:/storage
+    command: ["npm", "run", "jobs:nightly"]
+    restart: "no"
+
+  # Optional outbound notifications (brief §29, §46): email / Slack /
+  # WhatsApp copies of inbox notifications. Only started when asked for:
+  #   docker compose --profile integrations up -d notifier
+  # and only sends over the channels configured in .env.
+  notifier:
+    image: aktivacity-portal-migrator
+    pull_policy: never
+    profiles: ["integrations"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://${PORTAL_HOSTNAME}}
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_TEMPLATE: ${WHATSAPP_TEMPLATE:-}
+      WHATSAPP_TEMPLATE_LANG: ${WHATSAPP_TEMPLATE_LANG:-en}
+    command: ["npm", "run", "notifications:dispatch", "--", "--watch"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   caddy:
     image: caddy:2-alpine

@@ -83,6 +83,39 @@ describe('storage paths are built from identifiers, not user input', () => {
   });
 });
 
+describe('downloadFilename carries the version and the project ID (brief §19, §24)', () => {
+  test('a version gets its number; one already numbered is left alone', () => {
+    assert.equal(storage.downloadFilename('Video_Final.mp4', 2), 'Video_Final_v2.mp4');
+    assert.equal(storage.downloadFilename('Video_Final_v2.mp4', 2), 'Video_Final_v2.mp4');
+    assert.equal(storage.downloadFilename('Video_Final_v2.mp4', 3), 'Video_Final_v2_v3.mp4', 'a different number is a new version');
+  });
+
+  test('an attachment has no version and keeps its name', () => {
+    assert.equal(storage.downloadFilename('PO-4411.pdf', null), 'PO-4411.pdf');
+  });
+
+  test('a name without an extension still takes the suffix', () => {
+    assert.equal(storage.downloadFilename('README', 3), 'README_v3');
+  });
+
+  test('with the project code, the code leads the name so the file is traceable off the portal', () => {
+    assert.equal(storage.downloadFilename('Video_Final.mp4', 2, 'AKT-2026-0001'), 'AKT-2026-0001_Video_Final_v2.mp4');
+    assert.equal(storage.downloadFilename('PO-4411.pdf', null, 'AKT-2026-0001'), 'AKT-2026-0001_PO-4411.pdf');
+    assert.equal(storage.downloadFilename('README', 1, 'AKT-2026-0001'), 'AKT-2026-0001_README_v1');
+  });
+
+  test('a name that already starts with the code is not prefixed twice', () => {
+    assert.equal(storage.downloadFilename('AKT-2026-0001_Video_Final.mp4', 2, 'AKT-2026-0001'), 'AKT-2026-0001_Video_Final_v2.mp4');
+    assert.equal(storage.downloadFilename('akt-2026-0001 brief.pdf', null, 'AKT-2026-0001'), 'akt-2026-0001 brief.pdf', 'whatever the case');
+  });
+
+  test('no code, an empty code or one of blanks changes nothing', () => {
+    assert.equal(storage.downloadFilename('cut.mp4', 1, null), 'cut_v1.mp4');
+    assert.equal(storage.downloadFilename('cut.mp4', 1, ''), 'cut_v1.mp4');
+    assert.equal(storage.downloadFilename('cut.mp4', 1, '   '), 'cut_v1.mp4');
+  });
+});
+
 describe('contentDisposition cannot inject headers', () => {
   test('control characters are stripped', () => {
     const header = storage.contentDisposition('evil\r\nX-Injected: yes.mp4');

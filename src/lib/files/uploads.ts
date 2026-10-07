@@ -14,8 +14,11 @@ import {
   uploadSessions,
 } from '@/db/schema';
 import type { Actor } from '@/lib/authz';
+import { canAttachToProject, canUploadToDeliverable, uploadBlockedReason } from '@/lib/files/access';
 import { MONTH_CLOSED_MESSAGE } from '@/lib/months/lifecycle';
 import { onDeliverableUploaded } from '@/lib/notifications/notify';
+import { workBlockedReason } from '@/lib/projects/status';
+import { syncProjectStatus } from '@/lib/qa/project-status';
 import { openRevisionFor, syncRevisionStatus } from '@/lib/revisions/status';
 import {
   absolutePath,
@@ -50,6 +53,12 @@ export interface CreateSessionInput {
   target: 'deliverable' | 'attachment';
   deliverableId?: number;
   projectId?: number;
+  /** For an attachment: pin it to one assignment or revision of that project (§7, §15). */
+  assignmentId?: number;
+  revisionId?: number;
+  purpose?: string | null;
+  /** For an attachment: the PO document (§3), or a plain reference (the default). */
+  kind?: 'po' | 'reference';
   filename: string;
   size: number;
   mimeType?: string | null;
@@ -84,12 +93,19 @@ export async function createUploadSession(actor: Actor, input: CreateSessionInpu
       target: input.target,
       deliverableId: input.target === 'deliverable' ? input.deliverableId! : null,
       projectId: input.target === 'attachment' ? input.projectId! : null,
+      assignmentId: input.target === 'attachment' ? input.assignmentId ?? null : null,
+      revisionId: input.target === 'attachment' ? input.revisionId ?? null : null,
+      // A blank purpose or note is no purpose or note: stored as null, so the
+      // attachment falls back to 'reference' and the version history shows
+      // nothing rather than an empty line.
+      purpose: input.target === 'attachment' ? input.purpose?.trim().slice(0, 40) || null : null,
+      kind: input.target === 'attachment' ? (input.kind ?? 'reference') : 'reference',
       originalFilename: input.filename.slice(0, 255),
       mimeType: input.mimeType ?? null,
       declaredSize: input.size,
       tempPath,
       expectedChecksum: input.checksum ?? null,
-      notes: input.notes ?? null,
+      notes: input.notes?.trim() || null,
       expiresAt: new Date(Date.now() + SESSION_TTL_MS),
     })
     .returning();
@@ -195,6 +211,11 @@ export interface CompletedUpload {
   /** Set when this version answers an open revision (brief §17). */
   revisionNo: number | null;
   projectId: number | null;
+  originalFilename: string;
+  /** Set when an attachment was pinned to an assignment. */
+  assignmentTitle: string | null;
+  /** For an attachment: the PO document (§3) or a reference; null for a deliverable version. */
+  kind: 'po' | 'reference' | null;
 }
 
 /**
@@ -207,6 +228,18 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
   const session = await loadOwnSession(actor, uploadId);
   if (!session) throw new UploadError(404, 'Unknown upload.');
   if (session.completedAt) throw new UploadError(409, 'This upload is already complete.');
+
+  // The rule that let the session open is checked again here: a session
+  // lives for a day, and the executive it belongs to may have been taken
+  // off the assignment — or the project shared away — since (brief §43).
+  const permitted = session.target === 'deliverable'
+    ? await canUploadToDeliverable(actor, session.deliverableId!)
+    : await canAttachToProject(actor, session.projectId!, {
+        assignmentId: session.assignmentId ?? undefined,
+        revisionId: session.revisionId ?? undefined,
+        kind: session.kind === 'po' ? 'po' : 'reference',
+      });
+  if (!permitted.allowed) throw new UploadError(403, permitted.reason ?? 'Not allowed.');
 
   const onDisk = await fileSize(session.tempPath);
   if (onDisk !== session.declaredSize || session.bytesReceived !== session.declaredSize) {
@@ -232,6 +265,7 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
       let versionNo: number | null = null;
       let revision: { id: number; revisionNo: number } | null = null;
       let projectId: number | null = null;
+      let assignmentTitle: string | null = null;
 
       if (session.target === 'deliverable') {
         // Lock the slot first, in its own statement: FOR UPDATE cannot be
@@ -245,23 +279,31 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
 
         const located = await tx.execute<{
           client_id: number; period_year: number; period_month: number; month_status: string;
-          project_id: number; deliverable_name: string; next_version: number;
+          project_status: string; project_id: number; deliverable_name: string; next_version: number;
+          slot_status: string;
         }>(sql`
           SELECT p.client_id, cm.period_year, cm.period_month, cm.status AS month_status,
-                 p.id AS project_id, d.name AS deliverable_name,
+                 p.status AS project_status, p.id AS project_id, d.name AS deliverable_name,
+                 d.status AS slot_status,
                  COALESCE(MAX(dv.version_no), 0) + 1 AS next_version
           FROM deliverables d
           JOIN projects p       ON p.id = d.project_id
           JOIN client_months cm ON cm.id = p.client_month_id
           LEFT JOIN deliverable_versions dv ON dv.deliverable_id = d.id
           WHERE d.id = ${session.deliverableId}
-          GROUP BY p.client_id, cm.period_year, cm.period_month, cm.status, p.id, d.name
+          GROUP BY p.client_id, cm.period_year, cm.period_month, cm.status, p.status, p.id, d.name, d.status
         `);
         const loc = located[0];
         if (!loc) throw new UploadError(404, 'That deliverable no longer exists.');
         // The session was opened while the month was open; it may have
         // closed since. The archive wins (brief §36).
         if (loc.month_status === 'closed') throw new UploadError(409, MONTH_CLOSED_MESSAGE);
+        // Likewise a project held or cancelled while the bytes were in flight.
+        const blocked = workBlockedReason(loc.project_status);
+        if (blocked) throw new UploadError(409, blocked);
+        // And a slot approved or handed to the PM while the bytes were in flight.
+        const slotBlocked = uploadBlockedReason(loc.slot_status);
+        if (slotBlocked) throw new UploadError(409, slotBlocked);
 
         deliverableId = session.deliverableId;
         deliverableName = loc.deliverable_name;
@@ -279,15 +321,39 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
           originalFilename: session.originalFilename,
         });
       } else {
-        const located = await tx.execute<{ client_id: number }>(sql`
-          SELECT client_id FROM projects WHERE id = ${session.projectId}
+        const located = await tx.execute<{
+          client_id: number; period_year: number; period_month: number; month_status: string;
+        }>(sql`
+          SELECT p.client_id, cm.period_year, cm.period_month, cm.status AS month_status
+          FROM projects p JOIN client_months cm ON cm.id = p.client_month_id
+          WHERE p.id = ${session.projectId}
         `);
         const loc = located[0];
         if (!loc) throw new UploadError(404, 'That project no longer exists.');
+        if (loc.month_status === 'closed') throw new UploadError(409, MONTH_CLOSED_MESSAGE);
+
+        // The parent was checked against the project when the session opened;
+        // re-read it here for the activity line, and in case it went since.
+        if (session.assignmentId !== null) {
+          const [a] = await tx.execute<{ title: string }>(sql`
+            SELECT title FROM assignments WHERE id = ${session.assignmentId} AND project_id = ${session.projectId}
+          `);
+          if (!a) throw new UploadError(404, 'That assignment no longer exists.');
+          assignmentTitle = a.title;
+        }
+        if (session.revisionId !== null) {
+          const [r] = await tx.execute<{ id: number; revision_no: number }>(sql`
+            SELECT id, revision_no FROM revisions WHERE id = ${session.revisionId} AND project_id = ${session.projectId}
+          `);
+          if (!r) throw new UploadError(404, 'That revision no longer exists.');
+          revision = { id: Number(r.id), revisionNo: Number(r.revision_no) };
+        }
 
         projectId = session.projectId;
         finalPath = attachmentRelativePath({
           clientId: Number(loc.client_id),
+          periodYear: Number(loc.period_year),
+          periodMonth: Number(loc.period_month),
           projectId: projectId!,
           storageKey,
           originalFilename: session.originalFilename,
@@ -341,22 +407,30 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
           .where(eq(deliverables.id, deliverableId!));
 
         // The first file to arrive is what turns "planned" into "in progress"
-        // (brief §18) — for the assignment, and for the project as a whole.
+        // (brief §18) for the assignment. The project follows its slots: in
+        // progress, or in QA once this was the last one still in production —
+        // and out of "planned" or "awaiting assignment" alike, since a team
+        // still without a lead does not stop the work that has started.
         await tx.execute(sql`
           UPDATE assignments SET status = 'in_progress'
           WHERE id = (SELECT assignment_id FROM deliverables WHERE id = ${deliverableId})
             AND status = 'planned'
         `);
-        await tx.execute(sql`
-          UPDATE projects SET status = 'in_progress'
-          WHERE id = ${projectId} AND status = 'planned'
-        `);
         if (revision) await syncRevisionStatus(tx, revision.id);
+        await syncProjectStatus(tx, projectId!);
       } else {
+        // Exactly one parent (attachments_exactly_one_parent): the most
+        // specific one the uploader named. Access still resolves through it
+        // to the project (files/access.ts). The kind travelled on the session
+        // and was checked above; a PO without a label is labelled as one.
+        const kind = session.kind === 'po' ? 'po' : 'reference';
         await tx.insert(attachments).values({
           fileId: file.id,
-          projectId: projectId!,
-          purpose: 'reference',
+          projectId: session.assignmentId === null && session.revisionId === null ? projectId! : null,
+          assignmentId: session.assignmentId,
+          revisionId: session.revisionId,
+          purpose: session.purpose ?? kind,
+          kind,
         });
       }
 
@@ -376,6 +450,9 @@ export async function completeUpload(actor: Actor, uploadId: string): Promise<Co
         versionNo,
         revisionNo: revision === null ? null : (revision as { revisionNo: number }).revisionNo,
         projectId,
+        originalFilename: session.originalFilename,
+        assignmentTitle,
+        kind: session.target === 'attachment' ? (session.kind === 'po' ? 'po' : 'reference') : null,
       };
     });
   } catch (error) {

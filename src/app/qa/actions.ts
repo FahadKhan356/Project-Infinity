@@ -1,7 +1,6 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import { QaError, parseReviewForm, reviewDeliverable } from '@/lib/qa/review';
 
@@ -10,7 +9,11 @@ export interface QaFormState {
   notice?: string;
 }
 
-/** One QA decision (brief §12, §13). The library owns the rules; this records and refreshes. */
+/**
+ * One QA decision (brief §12, §13). The library owns the rules and writes
+ * the record, inside its transaction and ahead of any automatic delivery
+ * (§25, §29); this refreshes and answers.
+ */
 export async function submitReview(
   _prev: QaFormState,
   formData: FormData,
@@ -28,24 +31,6 @@ export async function submitReview(
     throw error;
   }
 
-  await recordActivity({
-    actorId: actor.id,
-    action: 'qa.reviewed',
-    entityType: 'deliverable',
-    entityId: result.deliverableId,
-    projectId: result.projectId,
-    metadata: {
-      stage: result.stage,
-      decision: result.decision,
-      roundNo: result.roundNo,
-      deliverableName: result.deliverableName,
-      versionNo: result.versionNo,
-      newStatus: result.newStatus,
-      deliveryId: result.deliveryId,
-      projectStatus: result.projectStatus,
-    },
-  });
-
   revalidatePath('/qa');
   revalidatePath('/deliveries');
   revalidatePath('/work');
@@ -56,7 +41,9 @@ export async function submitReview(
   return {
     notice:
       result.newStatus === 'approved'
-        ? `${name} approved — it is now in Sales’ delivery queue.`
+        ? (result.autoDelivered
+          ? `${name} approved and delivered to the client portal.`
+          : `${name} approved — it is now in Sales’ delivery queue.`)
         : result.newStatus === 'awaiting_pm_qa'
           ? `${name} approved and passed to the Project Manager.`
           : `${name} sent back to ${result.stage === 'project_manager' ? 'the team' : 'the executive'}.`,

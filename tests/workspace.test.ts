@@ -25,6 +25,7 @@ let myWork: typeof import('../src/lib/workspace/my-work').myWork;
 let loadWorkspace: typeof import('../src/lib/workspace/workspace').loadWorkspace;
 let addComment: typeof import('../src/lib/workspace/comments').addComment;
 let WorkspaceError: typeof import('../src/lib/workspace/comments').WorkspaceError;
+let loadClientReport: typeof import('../src/lib/reports/monthly').loadClientReport;
 let uploads: typeof import('../src/lib/files/uploads');
 
 const ids: Record<string, number> = {};
@@ -85,6 +86,7 @@ async function setUp() {
   ({ myWork } = await import('../src/lib/workspace/my-work'));
   ({ loadWorkspace } = await import('../src/lib/workspace/workspace'));
   ({ addComment, WorkspaceError } = await import('../src/lib/workspace/comments'));
+  ({ loadClientReport } = await import('../src/lib/reports/monthly'));
   uploads = await import('../src/lib/files/uploads');
   const { fileProject } = await import('../src/lib/projects/file-project');
   const { triageProject } = await import('../src/lib/projects/triage');
@@ -373,5 +375,120 @@ describe('comments (brief §9)', { skip }, () => {
   test('an empty comment is refused', async () => {
     const ahmed = actor('executive', { id: ids.ahmed });
     await assert.rejects(addComment(ahmed, { projectId: ids.project, body: '   ' }), /Write something/);
+  });
+});
+
+// Placed last: it puts a v3 on Thumbnail 01, which the version tests above
+// must not see.
+describe('comments on a file version (brief §10, §19)', { skip }, () => {
+  const ahmed = () => actor('executive', { id: ids.ahmed, departmentIds: [ids.video] });
+  const sara = () => actor('executive', { id: ids.sara, departmentIds: [ids.design] });
+  const thumbOf = async (who: Actor) => {
+    const ws = await loadWorkspace(who, ids.project);
+    assert.ok(ws);
+    return { ws, thumb: ws.teams.find((t) => t.department === 'Design')!.deliverables.find((d) => d.id === ids.thumb01)! };
+  };
+
+  test('the Design lead puts a v3 on Sara’s slot', async () => {
+    const lead = actor('team_lead', { id: ids.leadDesign, leadDepartmentIds: [ids.design] });
+    const result = await upload(lead, ids.thumb01, 'Thumb_01_v3.png');
+    assert.equal(result.versionNo, 3);
+    const { thumb } = await thumbOf(sara());
+    assert.equal(thumb.currentVersion!.versionNo, 3);
+    ids.thumbV3 = thumb.currentVersion!.id;
+    ids.thumbV2 = thumb.versions.find((v) => v.versionNo === 2)!.id;
+  });
+
+  test('Ahmed comments on v3; it is listed under that version and nowhere else', async () => {
+    const before = (await myWork(ahmed())).current.find((i) => i.assignmentId === ids.ahmedAssignment)!.commentCount;
+
+    const result = await addComment(ahmed(), { versionId: ids.thumbV3, body: 'Crop is tighter now.' });
+    ids.versionComment = result.commentId;
+    assert.equal(result.projectId, ids.project);
+    assert.deepEqual(result.slot, {
+      deliverableId: ids.thumb01, deliverableName: 'Thumbnail 01', versionId: ids.thumbV3, versionNo: 3,
+    });
+
+    const { ws, thumb } = await thumbOf(sara());
+    assert.equal(thumb.currentVersion!.comments.length, 1);
+    const [c] = thumb.currentVersion!.comments;
+    assert.equal(c.id, result.commentId);
+    assert.equal(c.author, 'ahmed');
+    assert.equal(c.body, 'Crop is tighter now.');
+    assert.equal(c.versionId, ids.thumbV3);
+    assert.equal(c.versionNo, 3);
+    assert.equal(c.deliverableId, ids.thumb01);
+    assert.equal(c.deliverableName, 'Thumbnail 01');
+    for (const v of thumb.versions.filter((v) => v.id !== ids.thumbV3)) {
+      assert.equal(v.comments.length, 0, `v${v.versionNo} carries no comment`);
+    }
+    // A version thread lives under its version, not in the project thread —
+    // which still carries the earlier project- and slot-level comments.
+    assert.ok(!ws.comments.some((x) => x.id === result.commentId));
+    assert.ok(ws.comments.some((x) => x.deliverableId === null && x.author === 'ahmed'));
+    assert.ok(ws.comments.some((x) => x.deliverableId === ids.thumb01 && x.author === 'sara'));
+
+    const [row] = await sql`
+      SELECT project_id, deliverable_id, assignment_id, revision_id, version_id
+      FROM comments WHERE id = ${result.commentId}`;
+    assert.deepEqual(
+      [row.project_id, row.deliverable_id, row.assignment_id, row.revision_id, Number(row.version_id)],
+      [null, null, null, null, ids.thumbV3],
+    );
+
+    // §8 "comments": the count on My work includes the version thread.
+    const after = (await myWork(ahmed())).current.find((i) => i.assignmentId === ids.ahmedAssignment)!.commentCount;
+    assert.equal(after, before + 1);
+  });
+
+  test('the uploader and the slot’s executive are told; the author is not', async () => {
+    const rows = await sql<{ user_id: string; type: string; title: string; link_path: string }[]>`
+      SELECT user_id, type, title, link_path FROM notifications
+      WHERE entity_type = 'comment' AND entity_id = ${ids.versionComment}
+      ORDER BY user_id`;
+    assert.deepEqual(rows.map((r) => Number(r.user_id)), [ids.leadDesign, ids.sara].sort((a, b) => a - b));
+    for (const r of rows) {
+      assert.equal(r.type, 'comment.posted');
+      assert.match(r.title, /Thumbnail 01 v3/);
+      assert.equal(r.link_path, `/projects/${ids.project}#version-${ids.thumbV3}`);
+    }
+
+    // Sara on her own v2: uploader, executive and author are one person.
+    const own = await addComment(sara(), { versionId: ids.thumbV2, body: 'Noted, thanks.' });
+    const none = await sql`
+      SELECT 1 FROM notifications WHERE entity_type = 'comment' AND entity_id = ${own.commentId}`;
+    assert.equal(none.length, 0);
+    const { thumb } = await thumbOf(sara());
+    assert.equal(thumb.versions.find((v) => v.id === ids.thumbV2)!.comments.length, 1);
+  });
+
+  test('outside the project, or a version that does not exist, reads the same', async () => {
+    const omar = actor('executive', { id: ids.omar, departmentIds: [ids.video] });
+    await assert.rejects(addComment(omar, { versionId: ids.thumbV3, body: 'Hi' }), /No such/);
+    await assert.rejects(addComment(ahmed(), { versionId: 0, body: 'Hi' }), /No such/);
+  });
+
+  test('the month report labels the version comment with the file version', async () => {
+    const report = await loadClientReport(actor('project_manager', { id: ids.pm }), ids.client, { year: 2095, month: 9 });
+    assert.ok(report);
+    const c = report.comments.find((x) => x.id === ids.versionComment);
+    assert.ok(c, 'the version comment is part of the month');
+    assert.equal(c.about, 'Thumbnail 01 v3');
+    assert.equal(c.projectId, ids.project);
+    assert.equal(c.author, 'ahmed');
+    const project = report.projects.find((p) => p.id === ids.project);
+    assert.ok(project);
+    assert.ok(project.comments >= 1);
+  });
+});
+
+describe('the feed line for a comment (brief §25)', () => {
+  test('names the slot and the version the comment was left on', async () => {
+    const { describeActivity } = await import('../src/lib/activity/describe');
+    const line = (metadata: Record<string, unknown>) =>
+      describeActivity({ action: 'comment.posted', actorName: 'ahmed', metadata });
+    assert.equal(line({ deliverableName: 'Thumbnail 01', versionNo: 3 }), 'ahmed commented on Thumbnail 01 v3');
+    assert.equal(line({ deliverableName: 'Thumbnail 01' }), 'ahmed commented on Thumbnail 01');
+    assert.equal(line({}), 'ahmed commented');
   });
 });

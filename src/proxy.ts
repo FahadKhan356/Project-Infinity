@@ -8,7 +8,9 @@ import { NextResponse, type NextRequest } from 'next/server';
  * Proxy runs on every request including prefetches, so it must not touch the
  * database.
  */
-const PUBLIC_PATHS = ['/login'];
+// The login page, and what a phone needs to install the portal before
+// anyone has signed in (brief §29): the manifest and its icons.
+const PUBLIC_PATHS = ['/login', '/manifest.webmanifest', '/icon', '/apple-icon'];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

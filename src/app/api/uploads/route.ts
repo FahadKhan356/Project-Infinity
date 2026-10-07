@@ -18,6 +18,11 @@ export async function POST(request: Request) {
 
     let projectId: number | undefined;
     let deliverableId: number | undefined;
+    let assignmentId: number | undefined;
+    let revisionId: number | undefined;
+    // The PO document (§3) only when the client says exactly that; anything
+    // else is a reference.
+    let kind: 'po' | 'reference' = 'reference';
 
     if (target === 'deliverable') {
       deliverableId = Number(body.deliverableId);
@@ -41,7 +46,16 @@ export async function POST(request: Request) {
       if (!Number.isInteger(projectId)) {
         return Response.json({ error: 'projectId is required.' }, { status: 400 });
       }
-      const decision = await canAttachToProject(actor, projectId);
+      const optionalId = (value: unknown) =>
+        value === undefined || value === null || value === '' ? undefined : Number(value);
+      assignmentId = optionalId(body.assignmentId);
+      revisionId = optionalId(body.revisionId);
+      if ((assignmentId !== undefined && !Number.isInteger(assignmentId))
+        || (revisionId !== undefined && !Number.isInteger(revisionId))) {
+        return Response.json({ error: 'Unknown assignment or revision.' }, { status: 400 });
+      }
+      kind = body.kind === 'po' ? 'po' : 'reference';
+      const decision = await canAttachToProject(actor, projectId, { assignmentId, revisionId, kind });
       if (!decision.allowed) {
         await recordActivity({
           actorId: actor.id,
@@ -58,6 +72,10 @@ export async function POST(request: Request) {
       target,
       deliverableId,
       projectId,
+      assignmentId,
+      revisionId,
+      purpose: typeof body.purpose === 'string' ? body.purpose : null,
+      kind,
       filename,
       size,
       mimeType: typeof body.mimeType === 'string' ? body.mimeType : null,

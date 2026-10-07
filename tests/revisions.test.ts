@@ -5,7 +5,8 @@
  * and nobody else's; the lead hands it to an Executive; the Executive's
  * upload answers it as a new version of the same slot; QA and delivery run
  * as before; Sales closes it. Throughout, the project status says
- * "revision required" and returns to following the work when it is done.
+ * "revision required" and returns to following the work when it is done —
+ * a completed project included: it reopens, and completes again.
  *
  * Needs DATABASE_URL pointing at a migrated database.
  */
@@ -24,6 +25,7 @@ const skip = DATABASE_URL ? false : 'set DATABASE_URL to a migrated database to 
 let sql: ReturnType<typeof postgres>;
 let storageRoot: string;
 let uploads: typeof import('../src/lib/files/uploads');
+let access: typeof import('../src/lib/files/access');
 let createRevision: typeof import('../src/lib/revisions/revisions').createRevision;
 let assignRevision: typeof import('../src/lib/revisions/revisions').assignRevision;
 let closeRevision: typeof import('../src/lib/revisions/revisions').closeRevision;
@@ -71,6 +73,8 @@ async function upload(who: Actor, deliverableId: number, filename: string) {
 const slotStatus = async (id: number) => (await sql`SELECT status FROM deliverables WHERE id = ${id}`)[0].status as string;
 const projectStatus = async (id: number) => (await sql`SELECT status FROM projects WHERE id = ${id}`)[0].status as string;
 const revisionStatus = async (id: number) => (await sql`SELECT status FROM revisions WHERE id = ${id}`)[0].status as string;
+const latestDelivery = async (deliverableId: number) =>
+  (await sql`SELECT status FROM deliveries WHERE deliverable_id = ${deliverableId} ORDER BY id DESC LIMIT 1`)[0].status as string;
 
 async function purge() {
   const users = sql`SELECT id FROM users WHERE email LIKE '%@m8test.local'`;
@@ -98,6 +102,7 @@ async function setUp() {
   sql = postgres(DATABASE_URL!, { max: 1, onnotice: () => {} });
 
   uploads = await import('../src/lib/files/uploads');
+  access = await import('../src/lib/files/access');
   ({ createRevision, assignRevision, closeRevision, RevisionError } = await import('../src/lib/revisions/revisions'));
   ({ revisionList, loadRevision } = await import('../src/lib/revisions/queries'));
   ({ reviewDeliverable } = await import('../src/lib/qa/review'));
@@ -326,7 +331,7 @@ describe('working the revision (brief §17)', { skip }, () => {
     const [slot] = await sql`SELECT assignment_id FROM deliverables WHERE id = ${ids.video01}`;
     assert.equal(Number(slot.assignment_id), ids.omarAssignment);
     const [asg] = await sql`SELECT title, priority, to_char(end_date, 'YYYY-MM-DD') AS end_date FROM assignments WHERE id = ${ids.omarAssignment}`;
-    assert.match(asg.title, /Revision #1/);
+    assert.match(asg.title, /^Revision #01: /, 'numbered as the client numbers it');
     assert.equal(asg.priority, 'high');
     assert.equal(asg.end_date, '2093-10-05');
 
@@ -406,5 +411,143 @@ describe('working the revision (brief §17)', { skip }, () => {
     assert.equal(await revisionStatus(ids.rev2), 'cancelled');
     assert.equal(await slotStatus(ids.thumb01), 'delivered', 'a cancelled revision gives the slot back its delivered state');
     assert.equal(await projectStatus(ids.project), 'delivered');
+  });
+});
+
+describe('a revision after completion (brief §15, §26 step 8)', { skip }, () => {
+  test('Sales completes every hand-over; the project is completed', async () => {
+    const open = (await deliveryQueue(sales())).filter((d) => d.projectId === ids.project);
+    assert.equal(open.length, 2);
+    for (const d of open) await updateDelivery(sales(), { deliveryId: d.deliveryId, status: 'completed' });
+    assert.equal(await projectStatus(ids.project), 'completed');
+  });
+
+  test('client feedback reopens it, and the Executive can upload the fix', async () => {
+    const result = await createRevision(sales(), {
+      projectId: ids.project, title: 'Sound mix', clientFeedback: 'The music is too loud.',
+      deliverableIds: [ids.video01],
+    });
+    ids.rev3 = result.revisionId;
+    assert.equal(result.revisionNo, 3);
+    assert.equal(result.projectStatus, 'revision_required');
+    const [row] = await sql`SELECT status, completed_at FROM projects WHERE id = ${ids.project}`;
+    assert.equal(row.status, 'revision_required', '§18');
+    assert.equal(row.completed_at, null, 'no longer completed');
+    assert.equal(await slotStatus(ids.video01), 'changes_requested');
+    assert.equal(await latestDelivery(ids.video01), 'completed', 'the finished hand-over stays on record');
+
+    assert.equal((await access.canUploadToDeliverable(omar(), ids.video01)).allowed, true);
+    const uploaded = await upload(omar(), ids.video01, 'Film_v4.mp4');
+    assert.equal(uploaded.versionNo, 4);
+    assert.equal(uploaded.revisionNo, 3);
+    assert.equal(await projectStatus(ids.project), 'revision_required', 'an open revision outranks QA');
+  });
+
+  test('cancelling a revision on completed work gives the slot back as it was', async () => {
+    const first = await createRevision(sales(), {
+      projectId: ids.project, title: 'Thumbnail title', clientFeedback: 'Bigger title.', deliverableIds: [ids.thumb01],
+    });
+    const second = await createRevision(sales(), {
+      projectId: ids.project, title: 'Thumbnail colour', clientFeedback: 'Warmer.', deliverableIds: [ids.thumb01],
+    });
+    assert.equal(await slotStatus(ids.thumb01), 'changes_requested');
+
+    await closeRevision(pm(), { revisionId: second.revisionId, outcome: 'cancelled' });
+    assert.equal(await slotStatus(ids.thumb01), 'changes_requested', 'the other revision still wants it redone');
+
+    await closeRevision(pm(), { revisionId: first.revisionId, outcome: 'cancelled' });
+    assert.equal(await slotStatus(ids.thumb01), 'delivered');
+    assert.equal(await latestDelivery(ids.thumb01), 'completed');
+    assert.equal(await projectStatus(ids.project), 'revision_required', 'revision #3 is still open');
+  });
+
+  test('the rework runs through QA and delivery, and the project completes again', async () => {
+    const approved = await reviewDeliverable(leadVideo(), { deliverableId: ids.video01, decision: 'approved' });
+    assert.equal(await projectStatus(ids.project), 'ready_for_delivery');
+
+    await updateDelivery(sales(), { deliveryId: approved.deliveryId!, status: 'delivered' });
+    assert.equal(await revisionStatus(ids.rev3), 'delivered');
+    assert.equal(await projectStatus(ids.project), 'delivered');
+
+    await updateDelivery(sales(), { deliveryId: approved.deliveryId!, status: 'completed' });
+    await closeRevision(sales(), { revisionId: ids.rev3, outcome: 'closed' });
+    const [row] = await sql`SELECT status, completed_at FROM projects WHERE id = ${ids.project}`;
+    assert.equal(row.status, 'completed');
+    assert.ok(row.completed_at);
+  });
+
+  test('a revision opened and cancelled on a completed project leaves it completed', async () => {
+    const opened = await createRevision(sales(), {
+      projectId: ids.project, title: 'Second thoughts', clientFeedback: 'Actually, one more change.',
+      deliverableIds: [ids.thumb01],
+    });
+    assert.equal(opened.projectStatus, 'revision_required');
+    const cancelled = await closeRevision(pm(), { revisionId: opened.revisionId, outcome: 'cancelled' });
+    assert.equal(cancelled.projectStatus, 'completed');
+    assert.equal(await slotStatus(ids.thumb01), 'delivered');
+    const [row] = await sql`SELECT completed_at FROM projects WHERE id = ${ids.project}`;
+    assert.ok(row.completed_at, 'completed again, with its date');
+  });
+
+  test('closed unworked, the client happy with the original after all, it is completed again too', async () => {
+    const opened = await createRevision(sales(), {
+      projectId: ids.project, title: 'On reflection', clientFeedback: 'Maybe a shorter intro?',
+      deliverableIds: [ids.video01],
+    });
+    assert.equal(opened.projectStatus, 'revision_required');
+    assert.equal(await slotStatus(ids.video01), 'changes_requested');
+
+    const closed = await closeRevision(sales(), { revisionId: opened.revisionId, outcome: 'closed' });
+    assert.equal(closed.projectStatus, 'completed');
+    assert.equal(await slotStatus(ids.video01), 'delivered', 'nothing is left to redo');
+    assert.equal(await latestDelivery(ids.video01), 'completed');
+    const [asg] = await sql`SELECT status FROM assignments WHERE id = ${ids.omarAssignment}`;
+    assert.equal(asg.status, 'completed', 'Omar’s assignment closes again');
+    const [row] = await sql`SELECT completed_at FROM projects WHERE id = ${ids.project}`;
+    assert.ok(row.completed_at);
+  });
+});
+
+describe('a revision on work approved but not yet delivered', { skip }, () => {
+  test('ended unworked, the slot goes back to approved and Sales can still deliver it', async () => {
+    // The rework for one revision clears QA and waits in Sales' queue.
+    const first = await createRevision(sales(), {
+      projectId: ids.project, title: 'Colour grade', clientFeedback: 'Too warm.', deliverableIds: [ids.video01],
+    });
+    await upload(omar(), ids.video01, 'Film_v5.mp4');
+    const approved = await reviewDeliverable(leadVideo(), { deliverableId: ids.video01, decision: 'approved' });
+    assert.equal(await slotStatus(ids.video01), 'approved');
+    assert.equal(await latestDelivery(ids.video01), 'pending_delivery');
+    assert.equal(await revisionStatus(first.revisionId), 'approved');
+    assert.equal(await projectStatus(ids.project), 'ready_for_delivery');
+
+    // The client comes back again before it is sent, then thinks better of it.
+    const second = await createRevision(sales(), {
+      projectId: ids.project, title: 'Grade again', clientFeedback: 'Cooler still.', deliverableIds: [ids.video01],
+    });
+    assert.equal(await slotStatus(ids.video01), 'changes_requested');
+    assert.equal(await projectStatus(ids.project), 'revision_required');
+    const cancelled = await closeRevision(pm(), { revisionId: second.revisionId, outcome: 'cancelled' });
+    assert.equal(await slotStatus(ids.video01), 'approved', 'back to waiting for delivery, not delivered');
+    assert.equal(await latestDelivery(ids.video01), 'pending_delivery');
+    assert.equal(cancelled.projectStatus, 'ready_for_delivery');
+    assert.equal(await revisionStatus(first.revisionId), 'approved', 'the earlier revision is untouched');
+
+    // Closing one unworked does the same.
+    const third = await createRevision(sales(), {
+      projectId: ids.project, title: 'Once more', clientFeedback: 'Never mind.', deliverableIds: [ids.video01],
+    });
+    await closeRevision(sales(), { revisionId: third.revisionId, outcome: 'closed' });
+    assert.equal(await slotStatus(ids.video01), 'approved');
+    assert.equal(await projectStatus(ids.project), 'ready_for_delivery');
+
+    // Sales hands the approved file over: the slot and the first revision follow.
+    await updateDelivery(sales(), { deliveryId: approved.deliveryId!, status: 'delivered' });
+    assert.equal(await slotStatus(ids.video01), 'delivered');
+    assert.equal(await revisionStatus(first.revisionId), 'delivered');
+    assert.equal(await projectStatus(ids.project), 'delivered');
+    await updateDelivery(sales(), { deliveryId: approved.deliveryId!, status: 'completed' });
+    await closeRevision(sales(), { revisionId: first.revisionId, outcome: 'closed' });
+    assert.equal(await projectStatus(ids.project), 'completed');
   });
 });

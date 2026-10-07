@@ -6,14 +6,26 @@ import { statusLabel } from '@/lib/workspace/format';
 
 /**
  * Revisions this person can see (brief §16): the PM sees them all, a Team
- * Lead the ones touching their team, an Executive those on their projects,
- * Sales their clients'.
+ * Lead the ones touching their team, an Executive those on their current
+ * work — an open assignment on the project, or a slot of theirs the
+ * revision touches — and Sales their clients'.
  */
 export default async function RevisionsPage(props: PageProps<'/revisions'>) {
   const actor = await requireActor();
   const params = await props.searchParams;
   const includeClosed = params.all === '1';
-  const rows = await revisionList(actor, { includeClosed });
+  // ?project= narrows the list to one project (the link from /work); the
+  // scope still decides what is shown, so a wrong id shows nothing.
+  const projectParam = Number(params.project);
+  const projectId = Number.isInteger(projectParam) && projectParam > 0 ? projectParam : undefined;
+  const rows = await revisionList(actor, { includeClosed, projectId });
+  const listHref = (all: boolean) => {
+    const query = new URLSearchParams();
+    if (all) query.set('all', '1');
+    if (projectId !== undefined) query.set('project', String(projectId));
+    const qs = query.toString();
+    return qs ? `/revisions?${qs}` : '/revisions';
+  };
 
   return (
     <AppShell actor={actor}>
@@ -24,14 +36,20 @@ export default async function RevisionsPage(props: PageProps<'/revisions'>) {
             Client feedback on delivered work, and where each round stands.
           </p>
         </div>
-        <Link href={includeClosed ? '/revisions' : '/revisions?all=1'} className="text-sm text-muted hover:underline">
-          {includeClosed ? 'Hide closed' : 'Show closed'}
-        </Link>
+        <div className="flex flex-wrap items-baseline gap-x-3 text-sm text-muted">
+          {projectId !== undefined ? (
+            <Link href={includeClosed ? '/revisions?all=1' : '/revisions'} className="hover:underline">All projects</Link>
+          ) : null}
+          <Link href={listHref(!includeClosed)} className="hover:underline">
+            {includeClosed ? 'Hide closed' : 'Show closed'}
+          </Link>
+        </div>
       </div>
 
       {rows.length === 0 ? (
         <p className="mt-6 rounded-lg border border-border bg-surface px-4 py-6 text-sm text-muted">
-          No open revisions. Sales opens one from a delivered file when the client comes back.
+          {projectId !== undefined ? 'No open revisions on this project. ' : 'No open revisions. '}
+          Sales opens one from a delivered file when the client comes back.
         </p>
       ) : (
         <div className="mt-6 overflow-x-auto rounded-lg border border-border bg-surface">

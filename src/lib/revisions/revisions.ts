@@ -6,11 +6,17 @@ import { can, revisionScope } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { onRevisionAssigned, onRevisionCreated } from '@/lib/notifications/notify';
+import { workBlockedReason } from '@/lib/projects/status';
 import { syncAssignmentStatus, syncProjectStatus } from '@/lib/qa/project-status';
+import { restoreRevisedSlots } from '@/lib/revisions/status';
+import { MAX_COMMENT_LENGTH } from '@/lib/workspace/comments';
 
 export class RevisionError extends Error {}
 
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
+
+/** "#03", as the client numbers it — the same form everywhere it is printed. */
+export const revisionTag = (revisionNo: number) => `#${String(revisionNo).padStart(2, '0')}`;
 
 export interface RevisionInput {
   projectId: number;
@@ -20,6 +26,12 @@ export interface RevisionInput {
   priority?: Priority;
   deadline?: string | null;
   deliverableIds: number[];
+  /**
+   * An internal note from whoever opens it (brief §15 "Comments"), distinct
+   * from the client's words and the details: posted as the revision's first
+   * comment, by the same person, in the same step.
+   */
+  comment?: string | null;
 }
 
 export interface RevisionResult {
@@ -31,13 +43,31 @@ export interface RevisionResult {
 }
 
 /**
+ * Why a project takes no new rework, or null when it does: a held or
+ * cancelled project takes none (brief §18). A completed one does — client
+ * feedback after completion is exactly what a revision is. Pure, so the
+ * revision page offers a hand-off exactly where assignRevision accepts one.
+ */
+export function reworkBlockedReason(status: string): string | null {
+  return status === 'on_hold' || status === 'cancelled' ? workBlockedReason(status) : null;
+}
+
+async function assertProjectTakesWork(db: ReturnType<typeof getDb>, projectId: number): Promise<void> {
+  const [row] = await db.execute<{ status: string }>(sql`SELECT status FROM projects WHERE id = ${projectId}`);
+  const blocked = row ? reworkBlockedReason(row.status) : null;
+  if (blocked) throw new RevisionError(blocked);
+}
+
+/**
  * Sales opens a revision from client feedback (brief §15).
  *
  * It is pinned to the deliverables it is about, and those slots are the ones
  * that move: each goes back to `changes_requested` so the Executive's list
  * says "to redo", the delivery that came back is marked `revision_required`
  * (§14), and the project says `revision_required` (§18) until the revision
- * is worked through. Numbering is per project, so the client's "#03" is ours.
+ * is worked through — a completed project reopens. A delivery already marked
+ * completed stays so, as the record of that hand-over; the rework is
+ * delivered afresh. Numbering is per project, so the client's "#03" is ours.
  */
 export async function createRevision(actor: Actor, input: RevisionInput): Promise<RevisionResult> {
   if (!can(actor, 'revisions.create')) {
@@ -50,12 +80,17 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
 
   const deliverableIds = [...new Set(input.deliverableIds.filter((id) => Number.isInteger(id)))];
   if (deliverableIds.length === 0) throw new RevisionError('Choose at least one deliverable.');
+  const comment = input.comment?.trim() || null;
+  if (comment && comment.length > MAX_COMMENT_LENGTH) {
+    throw new RevisionError(`Keep the comment under ${MAX_COMMENT_LENGTH} characters.`);
+  }
 
   const db = getDb();
   if (!(await isProjectVisible(db, actor, input.projectId))) {
     throw new RevisionError('No such project.');
   }
   await assertMonthOpen(db, { projectId: input.projectId }, (m) => new RevisionError(m));
+  await assertProjectTakesWork(db, input.projectId);
 
   const idList = sql.join(deliverableIds.map((id) => sql`${id}`), sql`, `);
   const slots = await db.execute<{ id: number; assignment_id: number | null }>(sql`
@@ -86,6 +121,13 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
       await tx.execute(sql`
         INSERT INTO revision_deliverables (revision_id, deliverable_id, project_id)
         VALUES (${revisionId}, ${deliverableId}, ${input.projectId})
+      `);
+    }
+    // The opener's note becomes the first comment on the thread (§15), so
+    // the teams read it where the rest of the conversation will follow.
+    if (comment) {
+      await tx.execute(sql`
+        INSERT INTO comments (author_id, body, revision_id) VALUES (${actor.id}, ${comment}, ${revisionId})
       `);
     }
 
@@ -170,6 +212,7 @@ export async function assignRevision(actor: Actor, input: AssignRevisionInput): 
 
   const db = getDb();
   await assertMonthOpen(db, { projectId: Number(revision.project_id) }, (m) => new RevisionError(m));
+  await assertProjectTakesWork(db, Number(revision.project_id));
   const slots = await db.execute<{
     id: number; name: string; assignment_id: number | null; project_department_id: number;
     department_id: number; team_lead_id: number | null;
@@ -221,7 +264,7 @@ export async function assignRevision(actor: Actor, input: AssignRevisionInput): 
         INSERT INTO assignments (project_department_id, project_id, assignee_id, assigned_by, title,
                                  instructions, start_date, end_date, priority)
         VALUES (${projectDepartmentId}, ${revision.project_id}, ${input.assigneeId}, ${actor.id},
-                ${`Revision #${revision.revision_no}: ${revision.title}`}, ${instructions},
+                ${`Revision ${revisionTag(Number(revision.revision_no))}: ${revision.title}`}, ${instructions},
                 current_date, ${revision.deadline}, ${revision.priority}::priority_level)
         RETURNING id
       `);
@@ -243,10 +286,13 @@ export async function assignRevision(actor: Actor, input: AssignRevisionInput): 
     await tx.execute(sql`
       UPDATE revisions SET status = 'assigned' WHERE id = ${input.revisionId} AND status = 'new'
     `);
+    // Named by id: two teams may call their slots the same, and the right
+    // lead is the one whose slot went out.
     await onRevisionAssigned(tx, {
       projectId: Number(revision.project_id), revisionId: input.revisionId,
       revisionNo: Number(revision.revision_no), title: revision.title,
-      deliverableName: slot.name, assigneeId: input.assigneeId, actorId: actor.id,
+      deliverableId: Number(slot.id), deliverableName: slot.name,
+      assigneeId: input.assigneeId, actorId: actor.id,
     });
 
     return {
@@ -277,8 +323,11 @@ export interface CloseRevisionResult {
 
 /**
  * Sales (or the Project Manager) ends a revision. Closing records that the
- * client is satisfied; cancelling withdraws it and gives each untouched slot
- * back the delivered state it had.
+ * client is satisfied; cancelling withdraws it. Either way each slot whose
+ * rework never cleared QA — none uploaded, or one QA sent back — gets back
+ * the state it had, approved or delivered, and so does the delivery that
+ * was flagged for it (restoreRevisedSlots): a client happy with the
+ * original leaves nothing to redo, and the file they have stands.
  */
 export async function closeRevision(actor: Actor, input: CloseRevisionInput): Promise<CloseRevisionResult> {
   if (!can(actor, 'revisions.create') && !can(actor, 'projects.triage')) {
@@ -291,41 +340,20 @@ export async function closeRevision(actor: Actor, input: CloseRevisionInput): Pr
   if (revision.status === 'closed' || revision.status === 'cancelled') {
     throw new RevisionError('This revision is already closed.');
   }
+  // Ending one rewrites slots, deliveries and the project's status, so an
+  // archived month refuses it like every other change (brief §36).
+  const db = getDb();
+  await assertMonthOpen(db, { projectId: Number(revision.project_id) }, (m) => new RevisionError(m));
 
-  return getDb().transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     await tx.execute(sql`
       UPDATE revisions SET status = ${input.outcome}::revision_status, closed_at = now()
       WHERE id = ${input.revisionId}
     `);
 
-    if (input.outcome === 'cancelled') {
-      // A slot that was sent back for this revision and never re-uploaded
-      // returns to delivered, and so does the delivery that was flagged.
-      const restored = await tx.execute<{ id: number; assignment_id: number | null }>(sql`
-        UPDATE deliverables d
-        SET status = 'delivered'
-        FROM revision_deliverables rd
-        WHERE rd.revision_id = ${input.revisionId} AND rd.deliverable_id = d.id
-          AND d.status = 'changes_requested'
-          AND NOT EXISTS (SELECT 1 FROM deliverable_versions v
-                          WHERE v.deliverable_id = d.id AND v.revision_id = ${input.revisionId})
-          AND EXISTS (SELECT 1 FROM deliveries dl
-                      WHERE dl.deliverable_id = d.id AND dl.status = 'revision_required'
-                        AND dl.id = (SELECT max(id) FROM deliveries WHERE deliverable_id = d.id))
-        RETURNING d.id, d.assignment_id
-      `);
-      if (restored.length > 0) {
-        const ids = sql.join(restored.map((r) => sql`${Number(r.id)}`), sql`, `);
-        await tx.execute(sql`
-          UPDATE deliveries dl SET status = 'delivered'
-          WHERE dl.deliverable_id IN (${ids}) AND dl.status = 'revision_required'
-            AND dl.id = (SELECT max(id) FROM deliveries WHERE deliverable_id = dl.deliverable_id)
-        `);
-        for (const r of restored) {
-          if (r.assignment_id !== null) await syncAssignmentStatus(tx, Number(r.assignment_id));
-        }
-      }
-    }
+    // What it sent back goes back — the same way whether Sales ends it here
+    // or a cancellation ends it with the project.
+    await restoreRevisedSlots(tx, { revisionId: input.revisionId });
 
     const projectStatus = await syncProjectStatus(tx, Number(revision.project_id));
     return {
@@ -355,5 +383,6 @@ export function parseRevisionForm(formData: FormData): RevisionInput {
     priority,
     deadline: text('deadline'),
     deliverableIds: formData.getAll('deliverableId').map(Number).filter(Number.isInteger),
+    comment: text('comment'),
   };
 }

@@ -2,8 +2,9 @@
 
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { uploadResumable } from '@/components/files/resumable';
 
-type Phase = 'idle' | 'uploading' | 'finishing' | 'done' | 'error';
+type Phase = 'idle' | 'chosen' | 'uploading' | 'finishing' | 'done' | 'error';
 
 interface Props {
   deliverableId: number;
@@ -11,76 +12,39 @@ interface Props {
   nextVersion: number;
 }
 
-/** How many consecutive failed chunks before giving up. */
-const MAX_RETRIES = 5;
-
 /**
- * Drives the resumable upload protocol from the browser (README, "Files").
- *
- * A dropped chunk is not an error: the client asks the server where it stands
- * and resumes from that offset. Only a refusal — wrong slot, expired session,
- * checksum mismatch — surfaces as an error.
+ * Adds the next version to a deliverable slot, resumably (README, "Files").
+ * Choosing a file opens a one-line note — what changed in this version —
+ * which is kept with the version for the history the brief asks for (§10,
+ * §19). The note is optional; the file goes with or without it.
  */
 export function UploadButton({ deliverableId, nextVersion }: Props) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [phase, setPhase] = useState<Phase>('idle');
+  const [file, setFile] = useState<File | null>(null);
+  const [notes, setNotes] = useState('');
   const [percent, setPercent] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  async function send(file: File) {
+  async function send() {
+    if (!file) return;
     setPhase('uploading');
     setPercent(0);
     setError(null);
-
     try {
-      const opened = await fetch('/api/uploads', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target: 'deliverable',
-          deliverableId,
-          filename: file.name,
-          size: file.size,
-          mimeType: file.type || null,
-        }),
-      });
-      if (!opened.ok) throw new Error(await messageOf(opened));
-      const { uploadId, chunkSize } = (await opened.json()) as { uploadId: string; chunkSize: number };
-
-      let offset = 0;
-      let failures = 0;
-      while (offset < file.size) {
-        const end = Math.min(offset + chunkSize, file.size);
-        const response = await fetch(`/api/uploads/${uploadId}`, {
-          method: 'PATCH',
-          headers: { 'Upload-Offset': String(offset), 'Content-Type': 'application/octet-stream' },
-          body: file.slice(offset, end),
-        }).catch(() => null);
-
-        if (response?.status === 204) {
-          offset = Number(response.headers.get('Upload-Offset'));
-          failures = 0;
-        } else if (response && response.status !== 409 && response.status < 500) {
-          // A definite refusal, not a transport problem.
-          throw new Error(await messageOf(response));
-        } else {
-          if (++failures > MAX_RETRIES) {
-            throw new Error('The connection kept dropping. Your progress is kept — try again.');
-          }
-          // Resync with the server's recorded offset, then back off.
-          const head = await fetch(`/api/uploads/${uploadId}`, { method: 'HEAD' }).catch(() => null);
-          if (head?.ok) offset = Number(head.headers.get('Upload-Offset'));
-          await new Promise((resolve) => setTimeout(resolve, 1000 * failures));
-        }
-        setPercent(file.size === 0 ? 100 : Math.round((offset / file.size) * 100));
-      }
-
-      setPhase('finishing');
-      const finished = await fetch(`/api/uploads/${uploadId}/complete`, { method: 'POST' });
-      if (!finished.ok) throw new Error(await messageOf(finished));
-
+      const trimmed = notes.trim();
+      await uploadResumable(
+        file,
+        { target: 'deliverable', deliverableId, ...(trimmed ? { notes: trimmed } : {}) },
+        (p, next) => {
+          setPercent(p);
+          setPhase(next);
+        },
+      );
       setPhase('done');
+      setFile(null);
+      setNotes('');
       router.refresh();
     } catch (caught) {
       setPhase('error');
@@ -97,25 +61,61 @@ export function UploadButton({ deliverableId, nextVersion }: Props) {
         type="file"
         className="hidden"
         onChange={(event) => {
-          const file = event.target.files?.[0];
+          const chosen = event.target.files?.[0];
           event.target.value = '';
-          if (file) void send(file);
+          if (chosen) {
+            setFile(chosen);
+            setError(null);
+            setPhase('chosen');
+          }
         }}
       />
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => inputRef.current?.click()}
-        className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-60"
-      >
-        {phase === 'uploading'
-          ? `Uploading ${percent}%`
-          : phase === 'finishing'
-            ? 'Checking…'
-            : phase === 'done'
-              ? 'Uploaded'
-              : `Upload v${nextVersion}`}
-      </button>
+      {phase === 'chosen' && file ? (
+        <form
+          className="flex w-64 flex-col items-stretch gap-1 rounded-md border border-border bg-surface p-2 text-left"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void send();
+          }}
+        >
+          <p className="truncate text-xs" title={file.name}>{file.name}</p>
+          <input
+            type="text"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            maxLength={500}
+            placeholder={`What changed in v${nextVersion} (optional)`}
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => { setFile(null); setNotes(''); setPhase('idle'); }}
+              className="rounded-md border border-border px-2 py-1 text-xs"
+            >
+              Cancel
+            </button>
+            <button type="submit" className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white">
+              Upload v{nextVersion}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => inputRef.current?.click()}
+          className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-60"
+        >
+          {phase === 'uploading'
+            ? `Uploading ${percent}%`
+            : phase === 'finishing'
+              ? 'Checking…'
+              : phase === 'done'
+                ? 'Uploaded'
+                : `Upload v${nextVersion}`}
+        </button>
+      )}
       {phase === 'uploading' ? (
         <div className="h-1 w-24 overflow-hidden rounded bg-border" aria-hidden>
           <div className="h-full bg-accent transition-[width]" style={{ width: `${percent}%` }} />
@@ -128,14 +128,4 @@ export function UploadButton({ deliverableId, nextVersion }: Props) {
       ) : null}
     </div>
   );
-}
-
-async function messageOf(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { error?: string };
-    if (body.error) return body.error;
-  } catch {
-    // not JSON
-  }
-  return `Upload failed (${response.status}).`;
 }

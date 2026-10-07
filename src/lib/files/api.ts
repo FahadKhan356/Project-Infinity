@@ -4,13 +4,18 @@ import type { Actor } from '@/lib/authz';
 import { UploadError } from './uploads';
 
 /** API routes answer with JSON, never a redirect — they are called by scripts. */
-export async function requireApiActor(): Promise<Actor | Response> {
+export async function requireApiActor(opts: { allowClient?: boolean } = {}): Promise<Actor | Response> {
   const actor = await getActor();
   if (!actor) {
     return Response.json({ error: 'Not signed in.' }, { status: 401 });
   }
   if (actor.mustChangePassword) {
     return Response.json({ error: 'Change your password before using the API.' }, { status: 403 });
+  }
+  // Client portal logins reach an API only where the route opts in and then
+  // applies the portal's own rule (brief §29).
+  if (actor.role === 'client' && !opts.allowClient) {
+    return Response.json({ error: 'Not found.' }, { status: 404 });
   }
   return actor;
 }

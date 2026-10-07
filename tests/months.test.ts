@@ -33,6 +33,7 @@ let createAssignment: typeof import('../src/lib/planning/assign').createAssignme
 let reviewDeliverable: typeof import('../src/lib/qa/review').reviewDeliverable;
 let updateDelivery: typeof import('../src/lib/delivery/deliveries').updateDelivery;
 let createRevision: typeof import('../src/lib/revisions/revisions').createRevision;
+let closeRevision: typeof import('../src/lib/revisions/revisions').closeRevision;
 let addComment: typeof import('../src/lib/workspace/comments').addComment;
 let loadWorkspace: typeof import('../src/lib/workspace/workspace').loadWorkspace;
 
@@ -107,7 +108,7 @@ async function setUp() {
   ({ createAssignment } = await import('../src/lib/planning/assign'));
   ({ reviewDeliverable } = await import('../src/lib/qa/review'));
   ({ updateDelivery } = await import('../src/lib/delivery/deliveries'));
-  ({ createRevision } = await import('../src/lib/revisions/revisions'));
+  ({ createRevision, closeRevision } = await import('../src/lib/revisions/revisions'));
   ({ addComment } = await import('../src/lib/workspace/comments'));
   ({ loadWorkspace } = await import('../src/lib/workspace/workspace'));
   await purge();
@@ -369,6 +370,19 @@ describe('a closed month is read-only (brief §36)', { skip }, () => {
       }),
       closed,
     );
+    // A revision the archive still holds open (its status edited by hand)
+    // cannot be ended either: closing one rewrites slots and deliveries.
+    const [left] = await sql<{ id: number }[]>`
+      INSERT INTO revisions (project_id, revision_no, title, client_feedback, created_by)
+      VALUES (${ids.projectA}, 99, 'Left open', 'Still here?', ${ids.sales}) RETURNING id`;
+    try {
+      await assert.rejects(closeRevision(sales(), { revisionId: Number(left.id), outcome: 'cancelled' }), closed);
+      await assert.rejects(closeRevision(pm(), { revisionId: Number(left.id), outcome: 'closed' }), closed);
+      const [rev] = await sql`SELECT status, closed_at FROM revisions WHERE id = ${left.id}`;
+      assert.deepEqual([rev.status, rev.closed_at], ['new', null]);
+    } finally {
+      await sql`DELETE FROM revisions WHERE id = ${left.id}`;
+    }
     assert.equal(await projectStatus(ids.projectA), 'completed', 'nothing moved');
   });
 
@@ -424,6 +438,14 @@ describe('reopening a month (brief §36)', { skip }, () => {
 });
 
 describe('copying a month forward (brief §38)', { skip }, () => {
+  // Since the film was filed, the PM has decided Video's cuts do go to them
+  // before delivery while Design's thumbnail still does not (§13). The month
+  // is closed by now, so the team row is set directly rather than through
+  // triage; the project's own intake default stays "no".
+  before(async () => {
+    await sql`UPDATE project_departments SET requires_pm_qa = true WHERE id = ${ids.videoTeam}`;
+  });
+
   test('the plan lists the live orders of the month with everything Sales may change', async () => {
     const plan = await copy.copyMonthPlan(sales(), { clientId: ids.client, fromMonthId: ids.september });
     assert.equal(plan.source.label, 'September 2091');
@@ -440,10 +462,11 @@ describe('copying a month forward (brief §38)', { skip }, () => {
     assert.equal(a.requirements, 'Two cuts and a thumbnail');
     assert.equal(a.deadline, '2091-09-25');
     assert.equal(a.suggestedDeadline, '2091-10-25');
-    assert.equal(a.requiresPmQa, false);
+    assert.equal(a.requiresPmQa, false, 'the intake default');
     assert.deepEqual(
-      a.departments.map((d) => [d.name, d.plannedDeliverables]),
-      [['Video', 2], ['Design', 1]],
+      a.departments.map((d) => [d.name, d.plannedDeliverables, d.requiresPmQa]),
+      [['Video', 2, true], ['Design', 1, false]],
+      'each team with its own QA route (§13)',
     );
   });
 
@@ -486,14 +509,17 @@ describe('copying a month forward (brief §38)', { skip }, () => {
     assert.equal(row.internal_notes, 'Rush job');
     assert.equal(row.priority, 'high');
     assert.equal(row.price_amount, '19000.00');
-    assert.equal(row.requires_pm_qa, false);
+    assert.equal(row.requires_pm_qa, false, 'the intake default travels as it was filed');
     assert.equal(row.deadline, '2091-10-20');
 
     const teams = await sql`
-      SELECT d.slug, pd.planned_deliverables, pd.team_lead_id FROM project_departments pd
+      SELECT d.slug, pd.planned_deliverables, pd.team_lead_id, pd.requires_pm_qa FROM project_departments pd
       JOIN departments d ON d.id = pd.department_id WHERE pd.project_id = ${created.projectId}`;
-    assert.deepEqual(teams.map((t) => [t.slug, Number(t.planned_deliverables), t.team_lead_id]), [['video', 3, null]],
-      'the unticked team is left behind and no lead is carried over');
+    assert.deepEqual(
+      teams.map((t) => [t.slug, Number(t.planned_deliverables), t.team_lead_id, t.requires_pm_qa]),
+      [['video', 3, null, true]],
+      'the unticked team is left behind, no lead is carried over, and Video keeps its own QA route rather than the project default',
+    );
 
     for (const table of ['deliverables', 'assignments', 'deliveries', 'revisions']) {
       const [{ n }] = await sql`SELECT count(*)::int AS n FROM ${sql(table)} WHERE project_id = ${created.projectId}`;
@@ -566,6 +592,32 @@ describe('copying a month forward (brief §38)', { skip }, () => {
       /not permitted/,
     );
   });
+
+  test('each team keeps its own QA route in the copy; a team added takes the intake default (§13)', async () => {
+    const seo = Number((await sql`SELECT id FROM departments WHERE slug = 'seo'`)[0].id);
+    const result = await copy.copyMonth(sales(), {
+      clientId: ids.client, fromMonthId: ids.september, period: '2091-10',
+      projects: [{
+        sourceProjectId: ids.projectA,
+        departments: [
+          { departmentId: ids.video, plannedDeliverables: 2 },
+          { departmentId: ids.design, plannedDeliverables: 1 },
+          { departmentId: seo, plannedDeliverables: 1 },
+        ],
+      }],
+    });
+    const projectId = result.projects[0].projectId;
+    const [row] = await sql`SELECT requires_pm_qa FROM projects WHERE id = ${projectId}`;
+    assert.equal(row.requires_pm_qa, false, 'the intake default is not derived from the teams');
+    const teams = await sql`
+      SELECT d.slug, pd.requires_pm_qa FROM project_departments pd
+      JOIN departments d ON d.id = pd.department_id WHERE pd.project_id = ${projectId} ORDER BY d.sort_order`;
+    assert.deepEqual(
+      teams.map((t) => [t.slug, t.requires_pm_qa]),
+      [['video', true], ['design', false], ['seo', false]],
+      'Video and Design as the PM set them; SEO, new in the copy, as Sales filed the project',
+    );
+  });
 });
 
 describe('copy helpers', { skip: false }, () => {
@@ -601,7 +653,19 @@ describe('copy helpers', { skip: false }, () => {
       { departmentId: 2, plannedDeliverables: 0 },
     ]);
     assert.equal(parsed.projects[1].title, null);
-    assert.equal(parsed.projects[1].priceAmount, null);
+    assert.equal(parsed.projects[1].priceAmount, undefined, 'no price field on the form: keep the source price');
+  });
+
+  test('a form with no price field leaves the price alone; an emptied one clears it', async () => {
+    const { parseCopyForm } = await import('../src/lib/months/copy');
+    const form = new FormData();
+    form.append('clientId', '5'); form.append('fromMonthId', '9'); form.append('period', '2026-10');
+    form.append('project', '41');
+    form.append('project', '42');
+    form.append('price_42', '');
+    const parsed = parseCopyForm(form);
+    assert.equal(parsed.projects[0].priceAmount, undefined, 'not on the form: keep the source price');
+    assert.equal(parsed.projects[1].priceAmount, null, 'blanked on the form: clear it');
   });
 
   test('deadlines move by whole months and clamp to the month’s end', async () => {

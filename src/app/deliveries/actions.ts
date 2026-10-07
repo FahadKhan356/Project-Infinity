@@ -1,7 +1,6 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import { DeliveryError, parseDeliveryForm, updateDelivery } from '@/lib/delivery/deliveries';
 
@@ -26,20 +25,8 @@ export async function submitDeliveryUpdate(
     if (error instanceof DeliveryError) return { error: error.message };
     throw error;
   }
-
-  await recordActivity({
-    actorId: actor.id,
-    action: 'delivery.updated',
-    entityType: 'delivery',
-    entityId: result.deliveryId,
-    projectId: result.projectId,
-    metadata: {
-      status: result.status,
-      deliverableId: result.deliverableId,
-      deliverableName: result.deliverableName,
-      projectStatus: result.projectStatus,
-    },
-  });
+  // The change is on the record already: updateDelivery writes the
+  // delivery.updated line inside its own transaction (brief §25).
 
   revalidatePath('/deliveries');
   revalidatePath('/projects');

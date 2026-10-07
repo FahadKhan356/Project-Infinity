@@ -26,6 +26,15 @@ let search: typeof import('../src/lib/search/search');
 const ids: Record<string, number> = {};
 const codes: Record<string, string> = {};
 
+/**
+ * §22 date filters: A is filed and delivered in September 2077, B filed in
+ * October 2077 and never delivered. 2077 is this suite's year, so no other
+ * suite's rows (all stamped now()) fall inside these ranges.
+ */
+const CREATED_A = '2077-09-15T12:00:00Z';
+const CREATED_B = '2077-10-15T12:00:00Z';
+const DELIVERED_A = '2077-09-20T12:00:00Z';
+
 function actor(role: Role, over: Partial<Actor> = {}): Actor {
   return {
     id: 0, email: `${role}@m10test.local`, fullName: role, role,
@@ -169,6 +178,16 @@ async function setUp() {
     projectDepartmentId: Number(bTeam.id), assigneeId: ids.omar, title: 'Teaser', deliverableCount: 2,
   });
 
+  // §22 date filters — see CREATED_A / CREATED_B / DELIVERED_A. Only the
+  // design slot's delivery (r2, now revision_required) is backdated: the
+  // search row's latest delivery is ordered by updated_at, which the trigger
+  // bumps on any UPDATE, and r2 must stay the newest. The video slot's
+  // delivery (r1) keeps its now() stamp, so a delivered range must bound
+  // both ends to isolate r2.
+  await sql`UPDATE projects SET created_at = ${CREATED_A}::timestamptz WHERE id = ${ids.projectA}`;
+  await sql`UPDATE projects SET created_at = ${CREATED_B}::timestamptz WHERE id = ${ids.projectB}`;
+  await sql`UPDATE deliveries SET delivered_at = ${DELIVERED_A}::timestamptz WHERE id = ${r2.deliveryId!}`;
+
   // X: another rep's client, Design only, untouched.
   const x = await fileProject(otherSales(), {
     clientId: ids.otherClient, period: '2090-09', title: 'Zenith brochure',
@@ -227,11 +246,53 @@ describe('what free text finds (brief §22)', { skip }, () => {
   });
 });
 
+describe('finding a client, not only its projects (brief §48)', { skip }, () => {
+  let emptyClient = 0;
+  before(async () => {
+    const [row] = await sql<{ id: number }[]>`
+      INSERT INTO clients (name, company_name, owner_user_id, created_by)
+      VALUES ('M10 Test Newco', 'Newco FZ LLC', ${ids.sales}, ${ids.sales}) RETURNING id`;
+    emptyClient = Number(row.id);
+  });
+  after(async () => { await sql`DELETE FROM clients WHERE id = ${emptyClient}`; });
+
+  test('a rep finds their client before it has a single project', async () => {
+    const hits = await search.searchClients(sales(), 'newco');
+    assert.deepEqual(hits.map((c) => c.name), ['M10 Test Newco']);
+    assert.equal(hits[0].id, emptyClient);
+    assert.equal(hits[0].activeProjects, 0);
+  });
+
+  test('by company name too, and the counts are right', async () => {
+    const hits = await search.searchClients(sales(), 'acme holdings');
+    assert.deepEqual(hits.map((c) => c.name), ['M10 Test Acme']);
+    assert.equal(hits[0].totalProjects, 2);
+  });
+
+  test('another rep does not learn the client exists', async () => {
+    assert.deepEqual(await search.searchClients(otherSales(), 'newco'), []);
+  });
+
+  test('an Executive finds only clients they have worked for', async () => {
+    assert.deepEqual((await search.searchClients(ahmed(), 'M10 Test')).map((c) => c.name), ['M10 Test Acme']);
+  });
+
+  test('blank text finds nothing rather than listing the book', async () => {
+    assert.deepEqual(await search.searchClients(sales(), '  '), []);
+  });
+});
+
 describe('permissions apply to search results (brief §22)', { skip }, () => {
   test('an Executive cannot discover a project they are not on, even by a colleague’s name', async () => {
     assert.deepEqual(await search.searchProjects(ahmed(), { q: 'Omar' }), []);
     assert.deepEqual(await search.searchProjects(ahmed(), { q: 'Winter' }), []);
     assert.deepEqual(titles(await search.searchProjects(ahmed(), { q: 'acme' })), ['Autumn launch film']);
+  });
+
+  test('a date filter does not widen an Executive’s reach', async () => {
+    // B was filed in October 2077 but Ahmed is not on it; A he is on.
+    assert.deepEqual(await search.searchProjects(ahmed(), { createdFrom: '2077-10-01' }), []);
+    assert.deepEqual(titles(await search.searchProjects(ahmed(), { createdFrom: '2077-09-01' })), ['Autumn launch film']);
   });
 
   test('a Sales rep finds only their clients’ projects', async () => {
@@ -294,6 +355,43 @@ describe('filters (brief §22)', { skip }, () => {
     assert.deepEqual(await mine(sales(), { deadlineFrom: '2090-09-01', deadlineTo: '2090-10-31' }), ['Autumn launch film', 'Winter teaser']);
   });
 
+  test('created-date and delivered-date ranges (brief §22 "Date")', async () => {
+    // Created: A filed 15 Sep 2077, B filed 15 Oct 2077.
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-09-01', createdTo: '2077-09-30' }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-10-01' }), ['Winter teaser']);
+    assert.deepEqual(await mine(sales(), { createdTo: '2077-09-30' }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-09-01', createdTo: '2077-10-31' }), ['Autumn launch film', 'Winter teaser']);
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-11-01', createdTo: '2077-11-30' }), []);
+
+    // Delivered: A's thumbnail was marked delivered 20 Sep 2077 and has since
+    // gone to revision_required — it was still delivered then. B never was.
+    assert.deepEqual(await mine(sales(), { deliveredFrom: '2077-09-01', deliveredTo: '2077-09-30' }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { deliveredFrom: '2077-10-01', deliveredTo: '2077-10-31' }), []);
+    assert.deepEqual(await mine(sales(), { deliveredFrom: '2077-09-01' }), ['Autumn launch film']);
+
+    // The "to" day is inclusive and "from" starts at its midnight, on the
+    // database's own calendar, whatever its session time zone. The other
+    // end of each range is pinned to September 2077 so A's video delivery,
+    // stamped now(), stays out of it.
+    const [{ day, before, after }] = await sql<{ day: string; before: string; after: string }[]>`
+      SELECT to_char(${DELIVERED_A}::timestamptz, 'YYYY-MM-DD') AS day,
+             to_char(${DELIVERED_A}::timestamptz - interval '1 day', 'YYYY-MM-DD') AS before,
+             to_char(${DELIVERED_A}::timestamptz + interval '1 day', 'YYYY-MM-DD') AS after`;
+    assert.deepEqual(await mine(sales(), { deliveredFrom: '2077-09-01', deliveredTo: day }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { deliveredFrom: '2077-09-01', deliveredTo: before }), []);
+    assert.deepEqual(await mine(sales(), { deliveredFrom: day, deliveredTo: '2077-09-30' }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { deliveredFrom: after, deliveredTo: '2077-09-30' }), []);
+
+    // The new ranges AND with the existing filters rather than replacing them.
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-09-01', createdTo: '2077-10-31', deliveredFrom: '2077-09-01' }), ['Autumn launch film']);
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-09-01', deadlineFrom: '2090-10-01' }), ['Winter teaser']);
+    assert.deepEqual(await mine(sales(), { createdFrom: '2077-09-01', period: '2090-09', status: ['planned'] }), []);
+
+    // A malformed or impossible date is ignored, like a bad month — never a
+    // query error.
+    assert.deepEqual(await mine(sales(), { createdFrom: 'yesterday', deliveredTo: '2077-02-30' }), ['Autumn launch film', 'Winter teaser']);
+  });
+
   test('the filter bar offers people only to those who see across teams', async () => {
     const forPm = await search.searchOptions(pm());
     assert.equal(forPm.canFilterByPeople, true);
@@ -314,14 +412,18 @@ describe('query string parsing', { skip: false }, () => {
     const filters = parseSearchParams({
       q: '  acme ', status: ['planned', 'bogus', 'qa'], team: '3', lead: 'x', executive: '0',
       client: '9', delivery: 'delivered', revisions: 'open', period: '2026-09', from: '2026-09-01', to: '',
+      created_from: '2026-08-01', created_to: ' ', delivered_from: '', delivered_to: '2026-09-30',
     });
     assert.deepEqual(filters, {
       q: 'acme', status: ['planned', 'qa'], departmentId: 3, teamLeadId: null, executiveId: null,
       clientId: 9, deliveryStatus: 'delivered', openRevisions: true, period: '2026-09',
       deadlineFrom: '2026-09-01', deadlineTo: null,
+      createdFrom: '2026-08-01', createdTo: null, deliveredFrom: null, deliveredTo: '2026-09-30',
     });
     assert.equal(hasAnyFilter(filters), true);
     assert.equal(hasAnyFilter(parseSearchParams({})), false);
     assert.equal(hasAnyFilter(parseSearchParams({ delivery: 'nope', status: 'bogus' })), false);
+    assert.equal(hasAnyFilter(parseSearchParams({ created_from: '2026-08-01' })), true);
+    assert.equal(hasAnyFilter(parseSearchParams({ delivered_to: '2026-09-30' })), true);
   });
 });

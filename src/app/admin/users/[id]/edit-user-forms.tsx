@@ -1,6 +1,8 @@
 'use client';
 
 import { useActionState } from 'react';
+import { RESTRICTION_KEYS, grantablePermissions } from '@/lib/authz/can';
+import type { Permission, Role } from '@/lib/authz/types';
 import {
   resetPassword,
   setDepartments,
@@ -23,7 +25,7 @@ interface Props {
   departments: { id: number; name: string; isProduction: boolean }[];
 }
 
-const PERMISSION_LABELS: Record<string, string> = {
+const PERMISSION_LABELS: Record<Permission, string> = {
   view_pricing: 'See project pricing',
   manage_users: 'Manage users',
   close_month: 'Close a client month',
@@ -31,6 +33,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   delete_files: 'Delete files',
   export_reports: 'Export reports',
   view_all_clients: 'See all clients, not only their own',
+  no_download: 'Cannot download files (view and preview in the portal only)',
 };
 
 function Feedback({ state }: { state: FormState }) {
@@ -55,7 +58,12 @@ function Feedback({ state }: { state: FormState }) {
   );
 }
 
-export function EditUserForms({ canManage, isSelf, user, memberships, grants, departments }: Props) {
+export function EditUserForms({ canManage, isSelf, user, memberships, grants: held, departments }: Props) {
+  const grantable = grantablePermissions(user.role as Role);
+  // What a row adds, and what it takes away (§43), listed apart; both are
+  // rows of user_permissions and travel in the same form.
+  const grants = grantable.filter((key) => !RESTRICTION_KEYS.has(key));
+  const restrictions = grantable.filter((key) => RESTRICTION_KEYS.has(key));
   const [detailState, detailAction, detailPending] = useActionState(updateUser, initial);
   const [deptState, deptAction, deptPending] = useActionState(setDepartments, initial);
   const [permState, permAction, permPending] = useActionState(setPermissions, initial);
@@ -149,15 +157,40 @@ export function EditUserForms({ canManage, isSelf, user, memberships, grants, de
         <form action={permAction} className="mt-4">
           <input type="hidden" name="userId" value={user.id} />
           <ul className="space-y-2">
-            {Object.entries(PERMISSION_LABELS).map(([key, label]) => (
+            {grants.map((key) => (
               <li key={key}>
                 <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" name="permission" value={key} defaultChecked={grants.includes(key)} />
-                  {label}
+                  <input type="checkbox" name="permission" value={key} defaultChecked={held.includes(key)} />
+                  {PERMISSION_LABELS[key]}
                 </label>
               </li>
             ))}
           </ul>
+          {grants.length === 0 ? (
+            <p className="mt-2 text-xs text-muted">
+              {user.role === 'executive'
+                ? 'An Executive holds no extra permissions: their access is their own assignments only (brief §23).'
+                : 'This role already holds everything a grant could add.'}
+            </p>
+          ) : null}
+          {restrictions.length > 0 ? (
+            <>
+              <h3 className="mt-5 text-sm font-semibold">Restrictions</h3>
+              <p className="mt-1 text-xs text-muted">
+                Taken away from the role. A restricted account still sees and previews the files it may see (brief §43).
+              </p>
+              <ul className="mt-3 space-y-2">
+                {restrictions.map((key) => (
+                  <li key={key}>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" name="permission" value={key} defaultChecked={held.includes(key)} />
+                      {PERMISSION_LABELS[key]}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
 
           <Feedback state={permState} />
 

@@ -3,20 +3,37 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "predev": "node scripts/check-env.mjs --dev",
     "dev": "next dev",
     "build": "next build",
+    "prestart": "node scripts/check-env.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "node --conditions=react-server --import tsx --test tests/*.test.ts",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed": "tsx scripts/seed.ts",
-    "files:sweep": "tsx scripts/sweep-files.ts"
+    "db:local": "sh scripts/local-postgres.sh",
+    "db:migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
+    "db:seed": "node --env-file-if-exists=.env --import tsx scripts/seed.ts",
+    "db:seed:demo": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/seed-demo.ts",
+    "db:reset:demo": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/seed-demo.ts --reset",
+    "files:sweep": "node --env-file-if-exists=.env --import tsx scripts/sweep-files.ts",
+    "backup": "node --env-file-if-exists=.env scripts/backup.mjs backup",
+    "backup:verify": "node --env-file-if-exists=.env scripts/backup.mjs verify-restore",
+    "backup:list": "node --env-file-if-exists=.env scripts/backup.mjs list",
+    "projects:recurring": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/run-recurring.ts",
+    "jobs:nightly": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/nightly.ts",
+    "notifications:dispatch": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/dispatch-notifications.ts"
+  },
+  "engines": {
+    "node": ">=22.12"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@node-rs/argon2": "^2.2.1",
     "drizzle-orm": "^0.45.3",
     "next": "16.3.6",
+    "nodemailer": "^10.0.10",
     "postgres": "^3.4.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -25,6 +42,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "drizzle-kit": "^0.31.11",

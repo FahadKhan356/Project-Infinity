@@ -5,11 +5,12 @@ import { getDb } from '@/db';
 import { requireActor } from '@/lib/auth/dal';
 import { AccessDenied } from '@/components/access-denied';
 import { AppShell } from '@/components/app-shell';
-import { can } from '@/lib/authz';
+import { canPlanTeam } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { formatMonth } from '@/lib/projects/intake';
 import { teamWorkload } from '@/lib/planning/workload';
 import { AssignPanel } from './assign-panel';
+import { suggestAssignees } from '@/lib/insights/suggest';
 
 export default async function TeamPlanningPage(props: PageProps<'/planning/[teamId]'>) {
   const actor = await requireActor();
@@ -45,8 +46,10 @@ export default async function TeamPlanningPage(props: PageProps<'/planning/[team
   // Visible only through the project, so the same rule governs both.
   if (!(await isProjectVisible(db, actor, Number(team.project_id)))) notFound();
 
-  const isLeadOfTeam = team.team_lead_id !== null && Number(team.team_lead_id) === actor.id;
-  const mayPlan = isLeadOfTeam || can(actor, 'planning.viewAllDepartments');
+  const mayPlan = canPlanTeam(actor, {
+    departmentId: Number(team.department_id),
+    teamLeadId: team.team_lead_id === null ? null : Number(team.team_lead_id),
+  });
   if (!mayPlan) {
     return (
       <AppShell actor={actor}>
@@ -76,6 +79,8 @@ export default async function TeamPlanningPage(props: PageProps<'/planning/[team
   const slotsCreated = existing.reduce((sum, a) => sum + Number(a.total), 0);
   const approved = existing.reduce((sum, a) => sum + Number(a.approved), 0);
 
+  const suggestions = await suggestAssignees(actor, projectDepartmentId);
+
   return (
     <AppShell actor={actor}>
       <Link href="/planning" className="text-sm text-muted hover:text-foreground">← Planning</Link>
@@ -100,7 +105,7 @@ export default async function TeamPlanningPage(props: PageProps<'/planning/[team
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
-        <Stat label="Promised at intake" value={String(Number(team.planned))} />
+        <Stat label="Promised when filed" value={String(Number(team.planned))} />
         <Stat label="Slots created" value={String(slotsCreated)} />
         <Stat label="Approved" value={`${approved}/${slotsCreated}`} />
       </div>
@@ -211,7 +216,26 @@ export default async function TeamPlanningPage(props: PageProps<'/planning/[team
         </p>
       </section>
 
+      {suggestions.length > 1 ? (
+        <section className="mt-8 rounded-lg border border-border bg-surface p-4">
+          <h2 className="text-sm font-semibold">Suggested</h2>
+          <p className="mt-0.5 text-xs text-muted">
+            Ranked from current workload, the last 90 days of QA and deadlines, and who knows this client.
+            A suggestion only — the choice is yours.
+          </p>
+          <ol className="mt-3 space-y-1.5 text-sm">
+            {suggestions.slice(0, 3).map((s, i) => (
+              <li key={s.userId}>
+                <span className="font-medium">{i + 1}. {s.name}</span>
+                <span className="text-muted"> — {s.reasons.join(' · ')}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
       <AssignPanel
+        suggestedId={suggestions[0]?.userId ?? null}
         projectDepartmentId={projectDepartmentId}
         members={workload.map((m) => ({ id: m.userId, name: m.fullName, openSlots: m.openSlots }))}
         defaultBaseName={team.department}

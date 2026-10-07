@@ -3,7 +3,8 @@
  *
  * Each action on the spine tells the people it concerns, and only them;
  * nobody is told about their own action. Deadline reminders are computed
- * live from the work rather than stored.
+ * live from the work for the inbox; the nightly run that also stores them
+ * is covered in tests/w3-notify.test.ts.
  *
  * Needs DATABASE_URL pointing at a migrated database.
  */
@@ -84,7 +85,13 @@ async function purge() {
   await sql`DELETE FROM files WHERE uploaded_by IN (${users})`;
   await sql`DELETE FROM department_members WHERE user_id IN (${users})`;
   await sql`DELETE FROM users WHERE email LIKE '%@m11test.local'`;
-  await sql`DELETE FROM project_code_sequence WHERE period_year = 2089`;
+  await sql`DELETE FROM project_code_sequence WHERE period_year IN (2089, 2081)`;
+}
+
+/** Today plus `offset` days, as the database sees it. */
+async function day(offset: number): Promise<string> {
+  const [row] = await sql<{ d: string }[]>`SELECT to_char(current_date + ${offset}::int, 'YYYY-MM-DD') AS d`;
+  return row.d;
 }
 
 before(async () => {
@@ -174,6 +181,13 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
   });
 
   test('re-saving the routing with the same leads pings nobody', async () => {
+    // Scoped to this project: other suites file projects in parallel, and
+    // every PM hears about each of those.
+    const total = async () => Number((await sql`
+      SELECT count(*)::int AS n FROM notifications
+      WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@m11test.local')
+        AND (title LIKE ${`%${codes.project}%`} OR body LIKE ${`%${codes.project}%`})`)[0].n);
+    const before = await total();
     await triageProject(pm(), {
       projectId: ids.project,
       teams: [
@@ -181,11 +195,15 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
         { departmentId: ids.design, teamLeadId: ids.leadDesign, plannedDeliverables: 1 },
       ],
     });
+    assert.equal(await total(), before, 'no team gained a lead: not one row, to anyone');
     assert.equal((await received(ids.leadVideo, 'project.assigned')).length, 1, 'still one');
-    assert.equal((await received(ids.sales, 'project.routed')).length, 2, 'Sales hears each routing');
+    assert.equal((await received(ids.leadDesign, 'project.assigned')).length, 1, 'still one');
+    assert.equal((await received(ids.sales, 'project.routed')).length, 1, 'a re-save is not a routing');
+    assert.deepEqual(await received(ids.pm, 'project.routed'), [], 'the PM re-saved their own routing');
+    assert.deepEqual(await received(ids.pm, 'project.lead_assigned'), []);
   });
 
-  test('an assignment tells its assignee only', async () => {
+  test('an assignment tells its assignee, and the project’s PM that the Team Lead assigned it', async () => {
     const teams = await sql<{ id: number; department_id: number }[]>`
       SELECT id, department_id FROM project_departments WHERE project_id = ${ids.project}`;
     ids.videoTeam = Number(teams.find((t) => Number(t.department_id) === ids.video)!.id);
@@ -203,9 +221,14 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
 
     const rows = await received(ids.ahmed, 'assignment.created');
     assert.equal(rows.length, 1);
-    assert.match(rows[0].title, /New task: Cut the film/);
+    assert.match(rows[0].title, new RegExp(`^New project assigned: ${codes.project}`), 'his first work on it');
+    const [{ body }] = await sql`SELECT body FROM notifications WHERE user_id = ${ids.ahmed} AND entity_id = ${v.assignmentId}`;
+    assert.match(body, /First task: Cut the film — 1 deliverable, due 2089-09-18\./);
     assert.deepEqual(await received(ids.omar), []);
-    assert.deepEqual(await received(ids.leadVideo, 'assignment.created'), []);
+    assert.deepEqual(await received(ids.leadVideo, 'assignment.created'), [], 'the lead planned it');
+    assert.deepEqual((await received(ids.pm, 'assignment.created')).map((r) => r.title),
+      ['Team Lead assigned: Cut the film', 'Team Lead assigned: Thumbnail']);
+    assert.deepEqual(await received(ids.pm2, 'assignment.created'), [], 'only the PM on the project');
   });
 
   test('an upload tells the lead of that team (QA needed) and the project’s PM', async () => {
@@ -228,13 +251,21 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
     assert.deepEqual(await received(ids.leadVideo, 'qa.rejected'), []);
   });
 
-  test('lead approval on a PM-QA project tells the PM that QA is required', async () => {
+  test('lead approval on a PM-QA project tells the Executive it moved on, and the PM that QA is required', async () => {
     await upload(ahmed(), ids.video01, 'Film_v2.mp4');
     await reviewDeliverable(leadVideo(), { deliverableId: ids.video01, decision: 'approved' });
     const rows = await received(ids.pm, 'qa.required');
     assert.equal(rows.length, 1);
-    assert.match(rows[0].title, /QA needed: Video 01 v2/);
-    assert.deepEqual(await received(ids.ahmed, 'qa.approved'), [], 'not approved yet — the PM has it');
+    assert.match(rows[0].title, /^QA needed: Video 01 v2$/);
+    assert.deepEqual(await received(ids.pm2, 'qa.required'), [], 'only the PM on the project');
+    assert.deepEqual((await received(ids.ahmed, 'qa.approved')).map((r) => r.title),
+      ['Video 01 v2 approved by your Team Lead'], 'an interim notice: the PM still has it');
+    assert.deepEqual(await received(ids.ahmed, 'qa.required'), []);
+    assert.deepEqual(await received(ids.leadVideo, 'qa.approved'), [], 'the lead approved it');
+    assert.deepEqual(await received(ids.leadVideo, 'qa.required'), []);
+    assert.deepEqual(await received(ids.pm, 'qa.approved'), []);
+    assert.deepEqual(await received(ids.sales, 'qa.approved'), []);
+    assert.deepEqual(await received(ids.sales, 'delivery.ready'), [], 'not cleared yet');
   });
 
   test('a PM rejection also tells the Team Lead who had approved it', async () => {
@@ -245,16 +276,48 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
     assert.equal((await received(ids.ahmed, 'qa.rejected')).length, 2);
   });
 
-  test('final approval tells the Executive and puts it in Sales’ queue', async () => {
+  test('final approval tells the Executive, worded apart from the lead’s, and puts it in Sales’ queue', async () => {
     await upload(ahmed(), ids.video01, 'Film_v3.mp4');
     await reviewDeliverable(leadVideo(), { deliverableId: ids.video01, decision: 'approved' });
     const approved = await reviewDeliverable(pm(), { deliverableId: ids.video01, decision: 'approved' });
     ids.video01Delivery = approved.deliveryId!;
-    assert.equal((await received(ids.ahmed, 'qa.approved')).length, 1);
+    assert.deepEqual((await received(ids.ahmed, 'qa.approved')).map((r) => r.title), [
+      'Video 01 v2 approved by your Team Lead',
+      'Video 01 v3 approved by your Team Lead',
+      'Video 01 v3 approved for delivery',
+    ], 'each stage once; the final one can be told from the interim');
     const ready = await received(ids.sales, 'delivery.ready');
     assert.equal(ready.length, 1);
-    assert.match(ready[0].title, /Ready for delivery: Video 01 v3/);
+    assert.match(ready[0].title, /^Ready for delivery: Video 01 v3$/);
+    assert.deepEqual(await received(ids.sales, 'qa.approved'), [], 'Sales hears of it as a delivery');
     assert.deepEqual(await received(ids.pm, 'delivery.ready'), []);
+    assert.deepEqual(await received(ids.pm, 'qa.approved'), [], 'the PM signed it off');
+    assert.deepEqual(await received(ids.leadVideo, 'qa.approved'), [], 'the lead is not told of their own approval');
+    assert.deepEqual(await received(ids.leadVideo, 'delivery.ready'), []);
+  });
+
+  test('without PM QA the lead’s approval is final: one notice, for delivery', async () => {
+    const filed = await fileProject(sales(), {
+      clientId: ids.client, period: '2089-09', title: 'Quick promo', requiresPmQa: false,
+      departments: [{ departmentId: ids.video, plannedDeliverables: 1 }],
+    });
+    await triageProject(pm(), {
+      projectId: filed.projectId,
+      teams: [{ departmentId: ids.video, teamLeadId: ids.leadVideo, plannedDeliverables: 1 }],
+    });
+    const [team] = await sql<{ id: number }[]>`SELECT id FROM project_departments WHERE project_id = ${filed.projectId}`;
+    const [promo] = (await createAssignment(leadVideo(), {
+      projectDepartmentId: Number(team.id), assigneeId: ids.ahmed, title: 'Promo cut',
+      deliverableCount: 1, deliverableBaseName: 'Promo',
+    })).deliverableIds;
+    await upload(ahmed(), promo, 'Promo_v1.mp4');
+    const ok = await reviewDeliverable(leadVideo(), { deliverableId: promo, decision: 'approved' });
+    assert.ok(ok.deliveryId, 'the lead’s approval clears QA');
+    assert.deepEqual((await received(ids.ahmed, 'qa.approved', filed.projectCode)).map((r) => r.title),
+      ['Promo 01 v1 approved for delivery'], 'no interim notice on the way');
+    assert.deepEqual(await received(ids.pm, 'qa.required', filed.projectCode), [], 'no PM stage to wait for');
+    assert.equal((await received(ids.sales, 'delivery.ready', filed.projectCode)).length, 1);
+    assert.deepEqual(await received(ids.leadVideo, 'qa.approved', filed.projectCode), []);
   });
 
   test('a revision tells the PM, the leads of the teams touched, and the executives on those slots', async () => {
@@ -275,11 +338,14 @@ describe('the spine, step by step (brief §20)', { skip }, () => {
     assert.deepEqual(await received(ids.sales), []);
   });
 
-  test('handing a revision to someone tells them', async () => {
+  test('handing a revision to someone tells them, and the PM who has it', async () => {
     await assignRevision(leadVideo(), { revisionId: ids.revision, deliverableId: ids.video01, assigneeId: ids.omar });
     const rows = await received(ids.omar, 'revision.assigned');
     assert.equal(rows.length, 1);
     assert.match(rows[0].title, /Revision #01 assigned to you: Video 01/);
+    assert.deepEqual((await received(ids.pm, 'revision.assigned')).map((r) => r.title),
+      ['Revision #01 handed to omar: Video 01']);
+    assert.deepEqual(await received(ids.leadVideo, 'revision.assigned'), [], 'the lead handed it out');
   });
 
   test('a copied month files its projects into the PMs’ inboxes like any other', async () => {
@@ -336,13 +402,19 @@ describe('the inbox', { skip }, () => {
 
 describe('deadlines, computed live (brief §20)', { skip }, () => {
   test('an Executive sees their assignment due soon or overdue; a lead sees the team’s; the PM sees projects', async () => {
-    // Move the fixture's dates to around today.
-    await sql`UPDATE assignments SET end_date = current_date + 2 WHERE id = ${ids.ahmedAssignment}`;
+    // Fresh work due around today, on a project whose own deadline just passed.
+    const trailer = await createAssignment(leadVideo(), {
+      projectDepartmentId: ids.videoTeam, assigneeId: ids.ahmed, title: 'Cut the trailer',
+      deliverableCount: 1, deliverableBaseName: 'Trailer', endDate: await day(2),
+    });
     await sql`UPDATE projects SET deadline = current_date - 1 WHERE id = ${ids.project}`;
+    // Cut the film's only slot went to Omar with the revision: its date is nobody's to chase.
+    await sql`UPDATE assignments SET end_date = current_date - 10 WHERE id = ${ids.ahmedAssignment}`;
 
     const forAhmed = await inboxMod.upcomingDeadlines(ahmed(), 3);
     const mineA = forAhmed.filter((d) => d.projectCode === codes.project);
-    assert.deepEqual(mineA.map((d) => [d.kind, d.title, d.daysLeft]), [['assignment', 'Cut the film', 2]]);
+    assert.deepEqual(mineA.map((d) => [d.kind, d.title, d.daysLeft]), [['assignment', 'Cut the trailer', 2]]);
+    assert.equal(mineA[0].linkPath, `/projects/${ids.project}#workspace`);
 
     const forSara = (await inboxMod.upcomingDeadlines(sara(), 3)).filter((d) => d.projectCode === codes.project);
     assert.deepEqual(forSara, [], 'her assignment has no end date');
@@ -354,7 +426,396 @@ describe('deadlines, computed live (brief §20)', { skip }, () => {
     assert.deepEqual(forPm.map((d) => [d.kind, d.daysLeft]), [['project', -1]]);
 
     // Outside the window, nothing.
-    await sql`UPDATE assignments SET end_date = current_date + 10 WHERE id = ${ids.ahmedAssignment}`;
+    await sql`UPDATE assignments SET end_date = current_date + 10 WHERE id = ${trailer.assignmentId}`;
     assert.deepEqual((await inboxMod.upcomingDeadlines(ahmed(), 3)).filter((d) => d.projectCode === codes.project), []);
+  });
+});
+
+describe('the people around the work (brief §20)', { skip }, () => {
+  // A second project, filed and run by the PM rather than by Sales.
+  const mine = async (who: Actor) => (await inboxMod.upcomingDeadlines(who, 3))
+    .filter((d) => d.projectCode === codes.p2).map((d) => [d.kind, d.title, d.daysLeft]);
+
+  test('a project filed for a rep’s client by someone else tells the rep', async () => {
+    const filed = await fileProject(pm(), {
+      clientId: ids.client, period: '2081-09', title: 'Autumn launch', requiresPmQa: true,
+      departments: [{ departmentId: ids.video, plannedDeliverables: 1 }, { departmentId: ids.design, plannedDeliverables: 1 }],
+    });
+    ids.p2 = filed.projectId;
+    codes.p2 = filed.projectCode;
+    const rep = await received(ids.sales, 'project.created', codes.p2);
+    assert.equal(rep.length, 1);
+    assert.match(rep[0].title, new RegExp(`Project created for your client: ${codes.p2}`));
+    const [{ body }] = await sql`
+      SELECT body FROM notifications WHERE user_id = ${ids.sales} AND type = 'project.created' AND entity_id = ${ids.p2}`;
+    assert.match(body, /Filed by pm/);
+    assert.deepEqual(await received(ids.pm, undefined, codes.p2), [], 'the PM who filed it');
+    const other = await received(ids.pm2, 'project.created', codes.p2);
+    assert.equal(other.length, 1);
+    assert.match(other[0].title, /New project: /);
+  });
+
+  test('work a PM hands out tells that team’s lead; work a lead hands out tells the PM', async () => {
+    await triageProject(pm(), {
+      projectId: ids.p2,
+      teams: [
+        { departmentId: ids.video, teamLeadId: ids.leadVideo, plannedDeliverables: 1 },
+        { departmentId: ids.design, teamLeadId: ids.leadDesign, plannedDeliverables: 1 },
+      ],
+    });
+    const teams = await sql<{ id: number; department_id: number }[]>`
+      SELECT id, department_id FROM project_departments WHERE project_id = ${ids.p2}`;
+    ids.p2Video = Number(teams.find((t) => Number(t.department_id) === ids.video)!.id);
+    ids.p2Design = Number(teams.find((t) => Number(t.department_id) === ids.design)!.id);
+    assert.equal((await received(ids.sales, 'project.routed', codes.p2)).length, 1, 'the rep follows it after filing too');
+
+    const film = await createAssignment(pm(), {
+      projectDepartmentId: ids.p2Video, assigneeId: ids.ahmed, title: 'Colour pass',
+      deliverableCount: 1, deliverableBaseName: 'Film', endDate: '2081-09-18',
+    });
+    [ids.p2Film] = film.deliverableIds;
+    ids.colourPass = film.assignmentId;
+    const lead = await received(ids.leadVideo, 'assignment.created', codes.p2);
+    assert.equal(lead.length, 1);
+    assert.match(lead[0].title, /New task in your team: Colour pass/);
+    const assignee = await received(ids.ahmed, 'assignment.created', codes.p2);
+    assert.deepEqual(assignee.map((r) => r.title), [`New project assigned: ${codes.p2} · Autumn launch`]);
+    assert.deepEqual(await received(ids.pm, 'assignment.created', codes.p2), [], 'the PM planned it');
+    assert.deepEqual(await received(ids.leadDesign, 'assignment.created', codes.p2), [], 'not the other team’s lead');
+
+    await createAssignment(leadDesign(), {
+      projectDepartmentId: ids.p2Design, assigneeId: ids.sara, title: 'Key visual', deliverableCount: 0,
+    });
+    const toPm = await received(ids.pm, 'assignment.created', codes.p2);
+    assert.equal(toPm.length, 1);
+    assert.match(toPm[0].title, /Team Lead assigned: Key visual/);
+    assert.deepEqual(await received(ids.pm2, 'assignment.created', codes.p2), [], 'not a PM who is not on it');
+    assert.deepEqual(await received(ids.leadDesign, 'assignment.created', codes.p2), [], 'the lead planned it');
+
+    // Work handed to the lead personally reaches them once, as their own.
+    await createAssignment(pm(), {
+      projectDepartmentId: ids.p2Video, assigneeId: ids.leadVideo, title: 'Storyboard', deliverableCount: 0,
+    });
+    const storyboard = (await received(ids.leadVideo, 'assignment.created', codes.p2))
+      .filter((r) => r.title.includes('Storyboard'));
+    assert.deepEqual(storyboard.map((r) => r.title), ['New task: Storyboard']);
+  });
+
+  test('a revision someone else opens tells the client’s rep', async () => {
+    await upload(ahmed(), ids.p2Film, 'Film_v1.mp4');
+    await reviewDeliverable(leadVideo(), { deliverableId: ids.p2Film, decision: 'approved' });
+    const ok = await reviewDeliverable(pm(), { deliverableId: ids.p2Film, decision: 'approved' });
+    await updateDelivery(sales(), { deliveryId: ok.deliveryId!, status: 'delivered' });
+
+    const r = await createRevision(pm(), {
+      projectId: ids.p2, title: 'Warmer grade', clientFeedback: 'Too cold.', deadline: await day(2),
+      deliverableIds: [ids.p2Film],
+    });
+    ids.p2Revision = r.revisionId;
+    const rep = await received(ids.sales, 'revision.created', codes.p2);
+    assert.equal(rep.length, 1);
+    assert.match(rep[0].title, /Revision #01: Warmer grade/);
+    assert.deepEqual(await received(ids.pm, 'revision.created', codes.p2), [], 'the PM opened it');
+    assert.equal((await received(ids.leadVideo, 'revision.created', codes.p2)).length, 1);
+    assert.equal((await received(ids.ahmed, 'revision.created', codes.p2)).length, 1, 'once, with his own wording');
+  });
+
+  test('revision work is due when the revision is, and one not handed out is the lead’s and PM’s to chase', async () => {
+    // The dates first planned are long gone; only the revision's date matters now.
+    await sql`UPDATE assignments SET end_date = current_date - 10 WHERE id = ${ids.colourPass}`;
+    await sql`UPDATE projects SET deadline = current_date - 5 WHERE id = ${ids.p2}`;
+
+    assert.deepEqual(await mine(ahmed()), [['assignment', 'Colour pass', 2]], 'his slot is back with him');
+    assert.deepEqual(await mine(leadVideo()), [
+      ['project', 'Autumn launch', 2],
+      ['revision', 'Revision #01: Warmer grade', 2],
+    ], 'to the lead, the reopened Colour pass is the revision waiting to be handed out');
+    assert.deepEqual(await mine(pm()), [['project', 'Autumn launch', 2], ['revision', 'Revision #01: Warmer grade', 2]]);
+    assert.deepEqual(await mine(sales()), [['project', 'Autumn launch', 2]], 'Sales opened nothing to hand out');
+    assert.deepEqual(await mine(leadDesign()), [['project', 'Autumn launch', 2]], 'the revision is not about design');
+    assert.deepEqual(await mine(sara()), []);
+
+    const revision = (await inboxMod.upcomingDeadlines(pm(), 3)).find((d) => d.kind === 'revision' && d.id === ids.p2Revision);
+    assert.equal(revision?.linkPath, `/revisions/${ids.p2Revision}`);
+  });
+
+  test('handed back to the same Executive, the reminder keeps the revision’s date; the lead hears who has it', async () => {
+    const handed = await assignRevision(pm(), { revisionId: ids.p2Revision, deliverableId: ids.p2Film, assigneeId: ids.ahmed });
+    assert.equal(handed.created, false, 'the reopened Colour pass takes it');
+
+    const lead = await received(ids.leadVideo, 'revision.assigned', codes.p2);
+    assert.equal(lead.length, 1);
+    assert.match(lead[0].title, /Revision #01 handed to ahmed: Film 01/);
+    assert.deepEqual(await received(ids.pm, 'revision.assigned', codes.p2), [], 'the PM handed it out');
+    assert.deepEqual((await received(ids.ahmed, 'revision.assigned', codes.p2)).map((r) => r.title),
+      ['Revision #01 assigned to you: Film 01']);
+
+    assert.deepEqual(await mine(ahmed()), [['assignment', 'Colour pass', 2]]);
+    assert.deepEqual(await mine(leadVideo()), [['project', 'Autumn launch', 2], ['assignment', 'Colour pass', 2]],
+      'handed out, it is no longer waiting on the lead');
+    assert.equal(await inboxMod.deadlineCount(ahmed()), 1, 'the header can count it');
+  });
+
+  test('the revised file reaches Sales named for its revision, and the reminders follow it to delivery', async () => {
+    await upload(ahmed(), ids.p2Film, 'Film_v2.mp4');
+    const qa = await received(ids.leadVideo, 'deliverable.uploaded', codes.p2);
+    assert.match(qa.at(-1)!.title, /^QA needed: Film 01 v2 \(revision #01\)$/);
+    await reviewDeliverable(leadVideo(), { deliverableId: ids.p2Film, decision: 'approved' });
+    const ok = await reviewDeliverable(pm(), { deliverableId: ids.p2Film, decision: 'approved' });
+
+    const ready = await received(ids.sales, 'delivery.ready', codes.p2);
+    assert.deepEqual(ready.map((r) => r.title), [
+      'Ready for delivery: Film 01 v1',
+      'Ready for delivery: Film 01 v2 (revision #01)',
+    ]);
+    assert.deepEqual(await mine(ahmed()), [], 'approved: his part is done');
+    assert.deepEqual(await mine(pm()), [['project', 'Autumn launch', 2]], 'still the revision’s date until it goes out');
+
+    await updateDelivery(sales(), { deliveryId: ok.deliveryId!, status: 'delivered' });
+    assert.deepEqual(await mine(pm()), []);
+  });
+
+  test('a Team Lead someone else routes in tells the PM the project was with', async () => {
+    const { onProjectRouted } = await import('../src/lib/notifications/notify');
+    const { getDb } = await import('../src/db');
+    const leadAssigned = async (who: number) =>
+      (await received(who, 'project.lead_assigned', codes.p2)).map((n) => n.title);
+
+    // The other PM re-routes the design team to a new lead.
+    await onProjectRouted(getDb(), {
+      projectId: ids.p2, newLeadIds: [ids.leadDesign], actorId: ids.pm2, previousManagerId: ids.pm,
+    });
+    assert.deepEqual(await leadAssigned(ids.pm), [`Team Lead assigned: ${codes.p2} · Autumn launch`]);
+    const [{ body }] = await sql`
+      SELECT body FROM notifications WHERE user_id = ${ids.pm} AND type = 'project.lead_assigned' AND entity_id = ${ids.p2}`;
+    assert.match(body, /Routed by pm2 to leadDesign\./);
+    assert.deepEqual(await leadAssigned(ids.pm2), [], 'the PM who routed it');
+
+    // No new lead, a caller that does not say who had it, or nobody had it
+    // yet (straight out of intake): nobody.
+    await onProjectRouted(getDb(), { projectId: ids.p2, newLeadIds: [], actorId: ids.pm2, previousManagerId: ids.pm });
+    await onProjectRouted(getDb(), { projectId: ids.p2, newLeadIds: [ids.leadDesign], actorId: ids.pm2 });
+    await onProjectRouted(getDb(), {
+      projectId: ids.p2, newLeadIds: [ids.leadVideo], actorId: ids.pm, previousManagerId: null,
+    });
+    assert.equal((await leadAssigned(ids.pm)).length, 1);
+    assert.deepEqual(await leadAssigned(ids.pm2), []);
+  });
+});
+
+describe('revision dates, case by case (brief §15, §20)', { skip }, () => {
+  /** [kind, title, daysLeft] for what `who` is reminded of on one project. */
+  const dueOn = async (who: Actor, code: string) => (await inboxMod.upcomingDeadlines(who, 3))
+    .filter((d) => d.projectCode === code).map((d) => [d.kind, d.title, d.daysLeft]);
+  const omar = () => actor('executive', { id: ids.omar, departmentIds: [ids.video] });
+
+  /** Filed by Sales without PM QA, and routed by the PM to each team's lead. */
+  async function routedProject(title: string, period: string, slugs: ('video' | 'design')[]) {
+    const filed = await fileProject(sales(), {
+      clientId: ids.client, period, title, requiresPmQa: false,
+      departments: slugs.map((s) => ({ departmentId: ids[s], plannedDeliverables: 1 })),
+    });
+    await triageProject(pm(), {
+      projectId: filed.projectId,
+      teams: slugs.map((s) => ({
+        departmentId: ids[s], teamLeadId: s === 'video' ? ids.leadVideo : ids.leadDesign, plannedDeliverables: 1,
+      })),
+    });
+    const teams = await sql<{ id: number; department_id: number }[]>`
+      SELECT id, department_id FROM project_departments WHERE project_id = ${filed.projectId}`;
+    const team = (slug: 'video' | 'design') => Number(teams.find((t) => Number(t.department_id) === ids[slug])!.id);
+    return { id: filed.projectId, code: filed.projectCode, team };
+  }
+  /** Uploaded, approved by the lead and delivered by Sales. */
+  async function deliver(who: Actor, lead: Actor, deliverableId: number, filename: string) {
+    await upload(who, deliverableId, filename);
+    const ok = await reviewDeliverable(lead, { deliverableId, decision: 'approved' });
+    await updateDelivery(sales(), { deliveryId: ok.deliveryId!, status: 'delivered' });
+  }
+
+  test('an undated revision leaves overdue work on its plan, until that plan has been met', async () => {
+    const p = await routedProject('Winter push', '2081-10', ['video']);
+    const edit = await createAssignment(leadVideo(), {
+      projectDepartmentId: p.team('video'), assigneeId: ids.ahmed, title: 'Edit',
+      deliverableCount: 1, deliverableBaseName: 'Clip', endDate: await day(-4),
+    });
+    const [clip] = edit.deliverableIds;
+    await sql`UPDATE projects SET deadline = current_date - 3 WHERE id = ${p.id}`;
+    await upload(ahmed(), clip, 'Clip_v1.mp4');
+
+    // Notes on the draft, with no date of their own: the late work is still late.
+    await createRevision(sales(), {
+      projectId: p.id, title: 'Draft notes', clientFeedback: 'Brighter.', deliverableIds: [clip],
+    });
+    assert.deepEqual(await dueOn(ahmed(), p.code), [['assignment', 'Edit', -4]]);
+    assert.deepEqual(await dueOn(leadVideo(), p.code), [['assignment', 'Edit', -4], ['project', 'Winter push', -3]]);
+    assert.deepEqual(await dueOn(pm(), p.code), [['project', 'Winter push', -3]]);
+
+    // Once it went out on time, an undated revision has no date to chase yet.
+    const ok = await reviewDeliverable(leadVideo(), { deliverableId: clip, decision: 'approved' });
+    await updateDelivery(sales(), { deliveryId: ok.deliveryId!, status: 'delivered' });
+    await createRevision(sales(), {
+      projectId: p.id, title: 'Second thoughts', clientFeedback: 'Shorter.', deliverableIds: [clip],
+    });
+    for (const who of [ahmed(), leadVideo(), pm()]) assert.deepEqual(await dueOn(who, p.code), []);
+  });
+
+  test('a revision across two teams is one row until handed out; then each lead chases their half', async () => {
+    const p = await routedProject('Awards reel', '2081-11', ['video', 'design']);
+    ids.p4 = p.id;
+    codes.p4 = p.code;
+    ids.p4Design = p.team('design');
+    const cut = await createAssignment(leadVideo(), {
+      projectDepartmentId: p.team('video'), assigneeId: ids.ahmed, title: 'Promo cut',
+      deliverableCount: 1, deliverableBaseName: 'Promo', endDate: await day(-25),
+    });
+    const art = await createAssignment(leadDesign(), {
+      projectDepartmentId: ids.p4Design, assigneeId: ids.sara, title: 'Promo art',
+      deliverableCount: 1, deliverableBaseName: 'Art', endDate: await day(-25),
+    });
+    [ids.promo01] = cut.deliverableIds;
+    [ids.art01] = art.deliverableIds;
+    await deliver(ahmed(), leadVideo(), ids.promo01, 'Promo_v1.mp4');
+    await deliver(sara(), leadDesign(), ids.art01, 'Art_v1.png');
+
+    const r = await createRevision(sales(), {
+      projectId: p.id, title: 'Both', clientFeedback: 'New logo everywhere.', deadline: await day(2),
+      deliverableIds: [ids.promo01, ids.art01],
+    });
+    ids.p4Revision = r.revisionId;
+    for (const who of [leadVideo(), leadDesign(), pm()]) {
+      assert.deepEqual(await dueOn(who, p.code), [['project', 'Awards reel', 2], ['revision', 'Revision #01: Both', 2]],
+        'the revision, not the reopened assignment as well');
+    }
+    assert.deepEqual(await dueOn(ahmed(), p.code), [['assignment', 'Promo cut', 2]]);
+    assert.deepEqual(await dueOn(sara(), p.code), [['assignment', 'Promo art', 2]]);
+
+    // The video half is handed out; the design half is still Sara's reopened work.
+    await assignRevision(leadVideo(), { revisionId: r.revisionId, deliverableId: ids.promo01, assigneeId: ids.ahmed });
+    assert.deepEqual(await dueOn(leadVideo(), p.code), [['project', 'Awards reel', 2], ['assignment', 'Promo cut', 2]]);
+    assert.deepEqual(await dueOn(leadDesign(), p.code), [['project', 'Awards reel', 2], ['assignment', 'Promo art', 2]]);
+    assert.deepEqual(await dueOn(pm(), p.code), [['project', 'Awards reel', 2]]);
+  });
+
+  test('a slot on two open revisions is due when the latest is, not on the older one’s missed date', async () => {
+    // Weeks on: the video half of #01 went out again, the design half is late.
+    await sql`UPDATE revisions SET deadline = current_date - 20 WHERE id = ${ids.p4Revision}`;
+    await deliver(ahmed(), leadVideo(), ids.promo01, 'Promo_v2.mp4');
+    const r2 = await createRevision(sales(), {
+      projectId: ids.p4, title: 'Logo', clientFeedback: 'Bigger logo.', deadline: await day(2),
+      deliverableIds: [ids.promo01],
+    });
+
+    // #02 is waiting to be handed out — though not while that would be refused.
+    const toHandOut = async (who: Actor) => (await dueOn(who, codes.p4)).filter(([kind]) => kind === 'revision');
+    assert.deepEqual(await toHandOut(pm()), [['revision', 'Revision #02: Logo', 2]]);
+    await sql`UPDATE projects SET status = 'on_hold', held_from_status = status WHERE id = ${ids.p4}`;
+    assert.deepEqual(await toHandOut(pm()), [], 'a held project takes no new work');
+    assert.deepEqual(await toHandOut(leadVideo()), []);
+    await sql`UPDATE projects SET status = held_from_status, held_from_status = NULL WHERE id = ${ids.p4}`;
+    const [{ client_month_id: monthId }] = await sql`SELECT client_month_id FROM projects WHERE id = ${ids.p4}`;
+    await sql`UPDATE client_months SET status = 'closed' WHERE id = ${monthId}`;
+    assert.deepEqual(await toHandOut(pm()), [], 'a closed month is read-only');
+    await sql`UPDATE client_months SET status = 'open' WHERE id = ${monthId}`;
+    assert.deepEqual(await toHandOut(leadVideo()), [['revision', 'Revision #02: Logo', 2]]);
+
+    await assignRevision(leadVideo(), { revisionId: r2.revisionId, deliverableId: ids.promo01, assigneeId: ids.omar });
+    assert.deepEqual(await dueOn(omar(), codes.p4), [['assignment', 'Revision #02: Logo', 2]], 'not #01’s missed date');
+    assert.deepEqual(await dueOn(sara(), codes.p4), [['assignment', 'Promo art', -20]], 'the design half is late on #01');
+    assert.deepEqual(await dueOn(leadVideo(), codes.p4), [['project', 'Awards reel', -20], ['assignment', 'Revision #02: Logo', 2]]);
+  });
+
+  test('the header counts what the inbox lists, row for row', async () => {
+    await createAssignment(leadDesign(), {
+      projectDepartmentId: ids.p4Design, assigneeId: ids.sara, title: 'Promo banner', deliverableCount: 0,
+      endDate: await day(1),
+    });
+    const hers = await inboxMod.upcomingDeadlines(sara(), 3);
+    assert.deepEqual(hers.map((d) => [d.kind, d.title, d.daysLeft]),
+      [['assignment', 'Promo art', -20], ['assignment', 'Promo banner', 1]]);
+    assert.equal(await inboxMod.deadlineCount(sara()), 2);
+    assert.equal(await inboxMod.deadlineCount(sara(), 0), 1, 'the window is the inbox’s');
+  });
+
+  test('a lead’s own work sent back is one row to them, not a revision and an assignment', async () => {
+    const p = await routedProject('Own cut', '2081-12', ['video']);
+    const own = await createAssignment(leadVideo(), {
+      projectDepartmentId: p.team('video'), assigneeId: ids.leadVideo, title: 'Lead cut',
+      deliverableCount: 1, deliverableBaseName: 'Cut', endDate: await day(9),
+    });
+    const [cut] = own.deliverableIds;
+    assert.deepEqual(await dueOn(leadVideo(), p.code), [], 'planned for next week');
+
+    const r = await createRevision(sales(), {
+      projectId: p.id, title: 'Again', clientFeedback: 'Once more.', deadline: await day(2), deliverableIds: [cut],
+    });
+    assert.deepEqual(await dueOn(leadVideo(), p.code), [['project', 'Own cut', 2], ['revision', 'Revision #01: Again', 2]]);
+    assert.deepEqual(await dueOn(pm(), p.code), [['project', 'Own cut', 2], ['revision', 'Revision #01: Again', 2]]);
+
+    // Taken up, it is their assignment on the revision's date.
+    await assignRevision(leadVideo(), { revisionId: r.revisionId, deliverableId: cut, assigneeId: ids.leadVideo });
+    assert.deepEqual(await dueOn(leadVideo(), p.code), [['assignment', 'Lead cut', 2], ['project', 'Own cut', 2]]);
+    assert.deepEqual(await dueOn(pm(), p.code), [['project', 'Own cut', 2]]);
+    assert.deepEqual((await received(ids.pm, 'revision.assigned', p.code)).map((n) => n.title),
+      ['Revision #01 handed to leadVideo: Cut 01']);
+    assert.deepEqual(await received(ids.leadVideo, 'revision.assigned', p.code), [], 'they took it themselves');
+  });
+
+  test('a rep moved out of Sales is not told about their old clients’ projects', async () => {
+    const [rep] = await sql<{ id: number }[]>`
+      INSERT INTO users (email, password_hash, full_name, role)
+      VALUES ('exrep@m11test.local', 'x', 'exrep', 'sales') RETURNING id`;
+    const [client] = await sql<{ id: number }[]>`
+      INSERT INTO clients (name, owner_user_id, created_by) VALUES ('M11 Test Client Two', ${rep.id}, ${rep.id})
+      RETURNING id`;
+    // The admin changes the role; the client is not handed on yet.
+    await sql`UPDATE users SET role = 'executive' WHERE id = ${rep.id}`;
+    const filed = await fileProject(pm(), {
+      clientId: Number(client.id), period: '2081-12', title: 'Handover',
+      departments: [{ departmentId: ids.video, plannedDeliverables: 1 }],
+    });
+    assert.deepEqual(await received(Number(rep.id), undefined, filed.projectCode), []);
+  });
+
+  test('handing out one of two same-named slots tells that team’s lead, once, and never the other', async () => {
+    // Dana works in both teams, and both teams name their slots the default way.
+    const [dana] = await sql<{ id: number }[]>`
+      INSERT INTO users (email, password_hash, full_name, role)
+      VALUES ('dana@m11test.local', 'x', 'dana', 'executive') RETURNING id`;
+    ids.dana = Number(dana.id);
+    await sql`INSERT INTO department_members (user_id, department_id) VALUES (${ids.dana}, ${ids.video}), (${ids.dana}, ${ids.design})`;
+    const p = await routedProject('Twin slots', '2081-12', ['video', 'design']);
+    const [videoSlot] = (await createAssignment(leadVideo(), {
+      projectDepartmentId: p.team('video'), assigneeId: ids.dana, title: 'Video part', deliverableCount: 1,
+    })).deliverableIds;
+    const [designSlot] = (await createAssignment(leadDesign(), {
+      projectDepartmentId: p.team('design'), assigneeId: ids.dana, title: 'Design part', deliverableCount: 1,
+    })).deliverableIds;
+    const r = await createRevision(sales(), {
+      projectId: p.id, title: 'Tweaks', clientFeedback: 'Small fixes.', deliverableIds: [videoSlot, designSlot],
+    });
+    await clearAll();
+
+    // The PM hands out the video half only: the video lead hears of it,
+    // exactly once, and the design lead nothing — the slot is named by its
+    // id, not by the name both teams gave theirs.
+    await assignRevision(pm(), { revisionId: r.revisionId, deliverableId: videoSlot, assigneeId: ids.dana });
+    const handed = 'Revision #01 handed to dana: Deliverable 01';
+    assert.deepEqual((await received(ids.leadVideo, 'revision.assigned', p.code)).map((n) => n.title), [handed]);
+    assert.deepEqual(await received(ids.leadDesign, 'revision.assigned', p.code), [], 'nothing was handed out in design');
+    assert.deepEqual(await received(ids.dana, 'revision.assigned', p.code).then((r) => r.map((n) => n.title)),
+      ['Revision #01 assigned to you: Deliverable 01']);
+
+    // Without the id, the name alone cannot say whose team the work went out
+    // in: no lead is told rather than the wrong one.
+    await clearAll();
+    const { onRevisionAssigned } = await import('../src/lib/notifications/notify');
+    const { getDb } = await import('../src/db');
+    await onRevisionAssigned(getDb(), {
+      projectId: p.id, revisionId: r.revisionId, revisionNo: r.revisionNo, title: 'Tweaks',
+      deliverableName: 'Deliverable 01', assigneeId: ids.dana, actorId: ids.pm,
+    });
+    assert.deepEqual(await received(ids.leadVideo, 'revision.assigned', p.code), []);
+    assert.deepEqual(await received(ids.leadDesign, 'revision.assigned', p.code), []);
   });
 });

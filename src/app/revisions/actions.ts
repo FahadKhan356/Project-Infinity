@@ -8,13 +8,15 @@ import { users } from '@/db/schema';
 import { recordActivity } from '@/lib/auth/audit';
 import { requireActor } from '@/lib/auth/dal';
 import {
-  RevisionError, assignRevision, closeRevision, createRevision, parseRevisionForm,
+  RevisionError, assignRevision, closeRevision, createRevision, parseRevisionForm, revisionTag,
 } from '@/lib/revisions/revisions';
 import { WorkspaceError, addComment } from '@/lib/workspace/comments';
 
 export interface RevisionFormState {
   error?: string;
   notice?: string;
+  /** Set instead of redirecting when the form still has files to attach (§15). */
+  createdRevision?: { projectId: number; revisionId: number };
 }
 
 function refresh(projectId: number, revisionId?: number) {
@@ -58,6 +60,9 @@ export async function openRevision(
   });
 
   refresh(result.projectId, result.revisionId);
+  if (formData.get('stayAfterCreate') === '1') {
+    return { createdRevision: { projectId: result.projectId, revisionId: result.revisionId } };
+  }
   redirect(`/revisions/${result.revisionId}`);
 }
 
@@ -140,7 +145,7 @@ export async function endRevision(
   });
 
   refresh(result.projectId, result.revisionId);
-  return { notice: `Revision #${result.revisionNo} ${result.status}.` };
+  return { notice: `Revision ${revisionTag(result.revisionNo)} ${result.status}.` };
 }
 
 export async function commentOnRevision(

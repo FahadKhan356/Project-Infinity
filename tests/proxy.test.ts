@@ -34,6 +34,13 @@ describe('proxy', () => {
     assert.equal(locationOf(res), null);
   });
 
+  test('lets a phone fetch the manifest and icons before signing in (brief §29)', () => {
+    for (const path of ['/manifest.webmanifest', '/icon', '/apple-icon']) {
+      assert.equal(locationOf(proxy(request(path, false))), null, path);
+    }
+    assert.notEqual(locationOf(proxy(request('/iconography', false))), null, 'only those exact paths');
+  });
+
   test('does NOT bounce a cookie holder off /login', () => {
     // A stale cookie must not create a redirect loop; only the login page,
     // which can actually resolve the session, may redirect away.

@@ -8,3 +8,8 @@ Dockerfile
 docker-compose.yml
 docs
 *.docx
+# Never bake production data into an image: dumps, restic cache, local files.
+backups
+storage
+# The project-local PostgreSQL cluster used for development without Docker.
+.data

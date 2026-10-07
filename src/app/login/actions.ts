@@ -8,6 +8,7 @@ import { recordActivity } from '@/lib/auth/audit';
 import { verifyPassword } from '@/lib/auth/password';
 import { clearFailedLogins, loginBlockedFor, recordFailedLogin } from '@/lib/auth/rate-limit';
 import { createSession } from '@/lib/auth/session';
+import { homePath } from '@/lib/dashboard/home';
 
 export interface LoginState {
   error?: string;
@@ -31,6 +32,7 @@ export async function login(_prev: LoginState, formData: FormData): Promise<Logi
   const [user] = await db
     .select({
       id: users.id,
+      role: users.role,
       passwordHash: users.passwordHash,
       isActive: users.isActive,
       mustChangePassword: users.mustChangePassword,
@@ -66,7 +68,8 @@ export async function login(_prev: LoginState, formData: FormData): Promise<Logi
     entityId: user.id,
   });
 
-  redirect(user.mustChangePassword ? '/change-password' : '/dashboard');
+  // Each role has its own first page (brief §8): an Executive opens their work.
+  redirect(user.mustChangePassword ? '/change-password' : homePath(user.role));
 }
 
 /**

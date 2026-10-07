@@ -1,6 +1,8 @@
 import 'server-only';
+import { autoDeliverIfEnabled } from '@/lib/portal/portal';
 import { sql } from 'drizzle-orm';
 import { getDb } from '@/db';
+import { requestIpAddress } from '@/lib/auth/audit';
 import type { Actor } from '@/lib/authz';
 import { can, canReviewDepartment } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
@@ -34,6 +36,8 @@ export interface ReviewResult {
   newStatus: 'awaiting_pm_qa' | 'approved' | 'changes_requested';
   /** Set when this decision cleared the last QA stage (brief §14). */
   deliveryId: number | null;
+  /** The cleared file went straight to the client portal (brief §29), not to Sales' queue. */
+  autoDelivered: boolean;
   projectStatus: string | null;
 }
 
@@ -86,6 +90,12 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
   const versionNo = Number(slot.version_no);
   const projectId = Number(slot.project_id);
   const comments = (input.comments ?? '').trim() || null;
+  // Both send the work back; a rejection is the harder verdict, and the
+  // executive who starts over is owed the reason (brief §12).
+  if (input.decision === 'rejected' && !comments) {
+    throw new QaError('Say why the file is rejected, so the executive knows what to redo.');
+  }
+  const ipAddress = await requestIpAddress();
 
   return db.transaction(async (tx) => {
     // Lock the slot and re-read its status: two reviewers, or one double
@@ -128,16 +138,49 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
     await tx.execute(sql`
       UPDATE deliverables SET status = ${newStatus}::deliverable_status WHERE id = ${slot.id}
     `);
+    // The decision goes on the record here (brief §25), with the decision
+    // and ahead of what it sets off: when it clears the last QA stage, Sales
+    // receives the delivery next (§14), and an automatic delivery writes its
+    // own line after that, so the timeline reads approval, then Sales
+    // received delivery, then any automatic delivery. Where the project ends
+    // up is filled in below, once it is known.
+    const [logged] = await tx.execute<{ id: number }>(sql`
+      INSERT INTO activity_log (actor_id, action, entity_type, entity_id, project_id, metadata, ip_address)
+      VALUES (${actor.id}, 'qa.reviewed', 'deliverable', ${Number(slot.id)}, ${projectId},
+              ${JSON.stringify({
+                stage, decision: input.decision, roundNo, deliverableName: slot.name, versionNo, newStatus, deliveryId,
+              })}::jsonb,
+              ${ipAddress})
+      RETURNING id
+    `);
+    if (deliveryId !== null) {
+      await tx.execute(sql`
+        INSERT INTO activity_log (actor_id, action, entity_type, entity_id, project_id, client_id, metadata, ip_address)
+        VALUES (${actor.id}, 'delivery.received', 'delivery', ${deliveryId}, ${projectId},
+                (SELECT client_id FROM projects WHERE id = ${projectId}),
+                ${JSON.stringify({ deliveryId, deliverableId: Number(slot.id), deliverableName: slot.name, versionNo, stage })}::jsonb,
+                ${ipAddress})
+      `);
+    }
+    // Automated client delivery (brief §29): straight to the portal when the
+    // client has asked for it, instead of waiting in Sales' queue. Decided
+    // before the notices go out, so Sales is told what actually happened.
+    const autoDelivered = deliveryId !== null
+      && await autoDeliverIfEnabled(tx, { deliveryId, deliverableId: Number(slot.id), actorId: actor.id });
 
     await onQaReviewed(tx, {
       deliverableId: Number(slot.id), versionNo, stage, decision: input.decision, newStatus,
-      comments, actorId: actor.id,
+      comments, actorId: actor.id, autoDelivered,
     });
 
     if (slot.assignment_id !== null) await syncAssignmentStatus(tx, Number(slot.assignment_id));
     const revision = await openRevisionFor(tx, Number(slot.id));
     if (revision) await syncRevisionStatus(tx, revision.id);
     const projectStatus = await syncProjectStatus(tx, projectId);
+    await tx.execute(sql`
+      UPDATE activity_log SET metadata = metadata || jsonb_build_object('projectStatus', ${projectStatus}::text)
+      WHERE id = ${Number(logged.id)}
+    `);
 
     return {
       deliverableId: Number(slot.id),
@@ -150,6 +193,7 @@ export async function reviewDeliverable(actor: Actor, input: ReviewInput): Promi
       decision: input.decision,
       newStatus,
       deliveryId,
+      autoDelivered,
       projectStatus,
     };
   });

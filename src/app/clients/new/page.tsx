@@ -5,7 +5,7 @@ import { AppShell } from '@/components/app-shell';
 import { can } from '@/lib/authz';
 import { NewClientForm } from './new-client-form';
 
-export default async function NewClientPage() {
+export default async function NewClientPage(props: PageProps<'/clients/new'>) {
   const actor = await requireActor();
   if (!can(actor, 'clients.manage')) {
     return (
@@ -24,7 +24,7 @@ export default async function NewClientPage() {
         check whether they already exist before creating a new one.
       </p>
       <div className="mt-6 max-w-md">
-        <NewClientForm />
+        <NewClientForm prospect={(await props.searchParams).prospect === '1'} />
       </div>
     </AppShell>
   );

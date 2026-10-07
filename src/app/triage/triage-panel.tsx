@@ -14,6 +14,8 @@ export interface TriageDepartment {
   teamLeadId: number | null;
   plannedDeliverables: number;
   hasWork: boolean;
+  /** This team's QA route (brief §13): Team Lead only, or Team Lead then PM. */
+  requiresPmQa: boolean;
   leads: { id: number; name: string }[];
 }
 
@@ -23,11 +25,10 @@ interface Props {
   priority: string;
   deadline: string | null;
   internalNotes: string | null;
-  requiresPmQa: boolean;
 }
 
 export function TriagePanel({
-  projectId, departments, priority, deadline, internalNotes, requiresPmQa,
+  projectId, departments, priority, deadline, internalNotes,
 }: Props) {
   const [state, formAction, pending] = useActionState(submitTriage, initial);
   const [selected, setSelected] = useState<number[]>(
@@ -41,8 +42,9 @@ export function TriagePanel({
     <section id="triage" className="mt-8 rounded-lg border border-accent/40 bg-surface p-6">
       <h2 className="text-sm font-semibold">Route this project</h2>
       <p className="mt-1 max-w-prose text-xs text-muted">
-        Assign a Team Lead per team. A team without a lead keeps the project in the intake
-        queue, so partial routing is visible rather than looking scheduled.
+        Assign a Team Lead per team. A team without a lead keeps the project in the Project
+        Closure Report, so partial routing is visible rather than looking scheduled. PM QA is
+        set per team (brief §13): tick it where the Project Manager also signs off before delivery.
       </p>
 
       <form action={formAction} className="mt-5">
@@ -78,6 +80,12 @@ export function TriagePanel({
                         <option key={l.id} value={l.id}>{l.name}</option>
                       ))}
                     </select>
+
+                    <label className="flex items-center gap-2 text-xs text-muted"
+                      title="This team’s approved files also go to the Project Manager before delivery">
+                      <input type="checkbox" name={`pmqa_${d.id}`} defaultChecked={d.requiresPmQa} disabled={!on} />
+                      PM QA
+                    </label>
                   </div>
                 </div>
                 {on && d.leads.length === 0 ? (
@@ -109,11 +117,6 @@ export function TriagePanel({
         <label className="mt-4 block text-sm font-medium" htmlFor="internalNotes">Internal notes</label>
         <textarea id="internalNotes" name="internalNotes" rows={3}
           defaultValue={internalNotes ?? ''} className={field} />
-
-        <label className="mt-4 flex items-center gap-2 text-sm">
-          <input type="checkbox" name="requiresPmQa" defaultChecked={requiresPmQa} />
-          Require Project Manager QA before delivery
-        </label>
 
         {state.error ? (
           <p role="alert" className="mt-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">

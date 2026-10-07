@@ -12,6 +12,8 @@ export interface CopyPlanDepartment {
   departmentId: number;
   name: string;
   plannedDeliverables: number;
+  /** This team's own QA route (brief §13), carried to the copied team as it is. */
+  requiresPmQa: boolean;
 }
 
 export interface CopyPlanProject {
@@ -29,6 +31,7 @@ export interface CopyPlanProject {
   /** null when the actor may not see pricing — never a hidden zero. */
   priceAmount: string | null;
   priceCurrency: string;
+  /** The project's intake default (§13); each team's own route is on `departments`. */
   requiresPmQa: boolean;
   deadline: string | null;
   /** The source deadline moved forward by the same number of months. */
@@ -42,15 +45,17 @@ export interface CopyPlan {
   source: { id: number; year: number; month: number; label: string };
   target: { year: number; month: number; value: string; label: string; status: 'open' | 'closed' | null };
   projects: CopyPlanProject[];
+  /** Every production team, so a copy can gain one the source did not have (§38). */
+  availableDepartments: { id: number; name: string }[];
 }
 
 type SourceRow = {
   id: number; project_code: string; title: string; project_type: string | null;
   objective: string | null; description: string | null; po_reference: string | null;
-  requirements: string | null; client_notes: string | null; internal_notes: string | null;
-  priority: Priority; price_amount: string | null; price_currency: string; requires_pm_qa: boolean;
-  deadline: string | null;
-  departments: { department_id: number; name: string; planned: number }[] | null;
+  requirements: string | null; client_notes: string | null; other_info: string | null;
+  internal_notes: string | null; priority: Priority; price_amount: string | null; price_currency: string; requires_pm_qa: boolean;
+  recurs_monthly: boolean; deadline: string | null;
+  departments: { department_id: number; name: string; planned: number; requires_pm_qa: boolean }[] | null;
 };
 
 /** The calendar month after (year, month). */
@@ -59,6 +64,23 @@ export function nextPeriod(year: number, month: number): { year: number; month: 
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth() + 1;
   return { year: y, month: m, value: `${y}-${String(m).padStart(2, '0')}` };
+}
+
+/**
+ * The `?to=` of the copy page, read before the plan is built. A value that
+ * is not a month — a browser rendering type="month" as plain text, or a
+ * hand-edited URL — is reported as the field's error and the plan falls
+ * back to its default month, rather than the page answering 404 for a slip
+ * in its own field. Absent means the default month, with nothing to say.
+ */
+export function copyTarget(raw: string | null | undefined): { period: string | null; error: string | null } {
+  const value = raw?.trim() ?? '';
+  if (value === '') return { period: null, error: null };
+  if (parseMonthValue(value)) return { period: value, error: null };
+  return {
+    period: null,
+    error: `"${value}" is not a month. Enter it as YYYY-MM, for example 2026-10; the month below is the default.`,
+  };
 }
 
 /**
@@ -80,13 +102,14 @@ async function loadSourceProjects(actor: Actor, fromMonthId: number): Promise<So
   const showPricing = can(actor, 'pricing.view');
   return getDb().execute<SourceRow>(sql`
     SELECT p.id, p.project_code, p.title, p.project_type, p.objective, p.description,
-           p.po_reference, p.requirements, p.client_notes, p.internal_notes, p.priority,
+           p.po_reference, p.requirements, p.client_notes, p.other_info, p.internal_notes, p.priority,
            ${showPricing ? sql`p.price_amount` : sql`NULL::numeric`} AS price_amount,
-           p.price_currency, p.requires_pm_qa,
+           p.price_currency, p.requires_pm_qa, p.recurs_monthly,
            to_char(p.deadline, 'YYYY-MM-DD') AS deadline,
            (SELECT json_agg(json_build_object(
                      'department_id', pd.department_id, 'name', d.name,
-                     'planned', pd.planned_deliverables) ORDER BY d.sort_order)
+                     'planned', pd.planned_deliverables,
+                     'requires_pm_qa', pd.requires_pm_qa) ORDER BY d.sort_order)
               FROM project_departments pd JOIN departments d ON d.id = pd.department_id
              WHERE pd.project_id = p.id) AS departments
     FROM projects p
@@ -130,9 +153,13 @@ export async function copyMonthPlan(
   `);
 
   const rows = await loadSourceProjects(actor, source.id);
+  const departments = await db.execute<{ id: number; name: string }>(sql`
+    SELECT id, name FROM departments WHERE is_production ORDER BY sort_order
+  `);
   return {
     clientId: input.clientId,
     clientName: source.client_name,
+    availableDepartments: departments.map((d) => ({ id: Number(d.id), name: d.name })),
     source: { id: Number(source.id), year: sourceYear, month: sourceMonth, label: formatMonth(sourceYear, sourceMonth) },
     target: {
       year: target.year,
@@ -162,6 +189,7 @@ export async function copyMonthPlan(
         departmentId: Number(d.department_id),
         name: d.name,
         plannedDeliverables: Number(d.planned),
+        requiresPmQa: d.requires_pm_qa === true,
       })),
     })),
   };
@@ -199,9 +227,12 @@ export interface CopyMonthResult {
  *
  * Each chosen project becomes a new project — a new code, status `new`, so
  * it lands in the Project Manager's intake like anything else — with its
- * lineage recorded in `copied_from_project_id`. Nothing else travels: no
- * deliverable slots, no assignments, no files, no revisions. Those belong
- * to the month they were made in (§33) and would be counted twice otherwise.
+ * lineage recorded in `copied_from_project_id`. Each team kept from the
+ * source keeps its own QA route (§13), and a team added in the copy takes
+ * the project's intake default, as it would at triage. Nothing else
+ * travels: no deliverable slots, no assignments, no files, no revisions.
+ * Those belong to the month they were made in (§33) and would be counted
+ * twice otherwise.
  *
  * All of it happens in one transaction: either every ticked project exists
  * in the new month, or none does.
@@ -226,18 +257,30 @@ export async function copyMonth(actor: Actor, input: CopyMonthInput): Promise<Co
 
   const sources = new Map<number, SourceRow>();
   for (const row of await loadSourceProjects(actor, Number(source.id))) sources.set(Number(row.id), row);
+  // A copy may keep, drop or add teams (§38 "new projects / removed
+  // projects" applies to the teams inside an order too), from the
+  // production departments that exist.
+  const production = new Set(
+    (await db.execute<{ id: number }>(sql`SELECT id FROM departments WHERE is_production`)).map((d) => Number(d.id)),
+  );
 
   // Validate everything before touching the database, so a bad row in the
   // form cannot leave half a month behind.
   const prepared = input.projects.map((p) => {
     const src = sources.get(p.sourceProjectId);
     if (!src) throw new MonthError('A project you ticked is not in that month.');
-    const allowed = new Map((src.departments ?? []).map((d) => [Number(d.department_id), d.name]));
+    // A team the source had keeps its own QA route (§13); one added in the
+    // copy is left unsaid here and takes the project's intake default below.
+    const sourceQa = new Map((src.departments ?? []).map((d) => [Number(d.department_id), d.requires_pm_qa === true]));
     const seen = new Set<number>();
     const departments = p.departments
-      .filter((d) => Number.isInteger(d.departmentId) && allowed.has(d.departmentId))
+      .filter((d) => Number.isInteger(d.departmentId) && production.has(d.departmentId))
       .filter((d) => !seen.has(d.departmentId) && seen.add(d.departmentId))
-      .map((d) => ({ departmentId: d.departmentId, plannedDeliverables: Math.max(0, d.plannedDeliverables | 0) }));
+      .map((d) => ({
+        departmentId: d.departmentId,
+        plannedDeliverables: Math.max(0, d.plannedDeliverables | 0),
+        requiresPmQa: sourceQa.get(d.departmentId),
+      }));
     if (departments.length === 0) {
       throw new MonthError(`${src.title} needs at least one team. Untick it instead if it is not wanted.`);
     }
@@ -265,11 +308,15 @@ export async function copyMonth(actor: Actor, input: CopyMonthInput): Promise<Co
         poReference: src.po_reference,
         requirements: p.requirements === undefined ? src.requirements : p.requirements,
         clientNotes: p.clientNotes === undefined ? src.client_notes : p.clientNotes,
+        otherInfo: src.other_info,
         internalNotes: p.internalNotes === undefined ? src.internal_notes : p.internalNotes,
         deadline: p.deadline === undefined ? null : p.deadline,
         priority: src.priority,
         priceAmount: p.priceAmount === undefined ? src.price_amount : p.priceAmount,
+        // The intake default, as filed: what a team added in the copy gets.
         requiresPmQa: src.requires_pm_qa === true,
+        // A repeating order stays repeating in the month it was copied into.
+        recursMonthly: src.recurs_monthly === true,
         copiedFromProjectId: Number(src.id),
       });
       created.push({
@@ -304,8 +351,11 @@ export function parseCopyForm(formData: FormData): CopyMonthInput {
   const projectIds = formData.getAll('project').map(Number).filter(Number.isInteger);
 
   const projects = projectIds.map((id) => {
-    const rawPrice = String(formData.get(`price_${id}`) ?? '').trim();
-    let priceAmount: string | null = null;
+    // No price field at all (the form hides it from those who cannot see
+    // pricing) means "keep the source price"; an emptied field clears it.
+    const rawPriceField = formData.get(`price_${id}`);
+    const rawPrice = String(rawPriceField ?? '').trim();
+    let priceAmount: string | null | undefined = rawPriceField === null ? undefined : null;
     if (rawPrice !== '') {
       const value = Number(rawPrice);
       if (!Number.isFinite(value) || value < 0) throw new MonthError('Enter a valid price.');

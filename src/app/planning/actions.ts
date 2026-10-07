@@ -11,6 +11,8 @@ import { PlanningError, createAssignment, parseAssignmentForm } from '@/lib/plan
 export interface PlanningFormState {
   error?: string;
   notice?: string;
+  /** The assignment just made, so the form can attach the references it was made with (§7). */
+  created?: { projectId: number; assignmentId: number };
 }
 
 export async function assignWork(
@@ -62,6 +64,7 @@ export async function assignWork(
 
   const n = result.deliverableIds.length;
   return {
+    created: { projectId: result.projectId, assignmentId: result.assignmentId },
     notice:
       n === 0
         ? 'Assigned with no deliverable slots yet.'

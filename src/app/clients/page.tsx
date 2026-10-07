@@ -5,8 +5,11 @@ import { requireActor } from '@/lib/auth/dal';
 import { AppShell } from '@/components/app-shell';
 import { can, clientScope } from '@/lib/authz';
 
-export default async function ClientsPage() {
+export default async function ClientsPage(props: PageProps<'/clients'>) {
   const actor = await requireActor();
+  const params = await props.searchParams;
+  const q = String((Array.isArray(params.q) ? params.q[0] : params.q) ?? '').trim().slice(0, 200);
+  const pattern = q === '' ? null : `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
   // The same scope fragment every other client query uses.
   const rows = await getDb().execute<{
@@ -23,6 +26,7 @@ export default async function ClientsPage() {
     FROM clients c
     LEFT JOIN users owner ON owner.id = c.owner_user_id
     WHERE ${clientScope(actor, 'c')}
+      ${pattern === null ? sql`` : sql`AND (c.name ILIKE ${pattern} OR c.company_name ILIKE ${pattern})`}
     ORDER BY c.name
   `);
 
@@ -31,7 +35,9 @@ export default async function ClientsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">Clients</h1>
-          <p className="mt-1 text-sm text-muted">{rows.length} client(s) visible to you</p>
+          <p className="mt-1 text-sm text-muted">
+            {rows.length} client(s) {q ? `matching “${q}”` : 'visible to you'}
+          </p>
         </div>
         {can(actor, 'clients.manage') ? (
           <Link href="/clients/new" className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white">
@@ -40,9 +46,17 @@ export default async function ClientsPage() {
         ) : null}
       </div>
 
+      <form method="get" action="/clients" className="mt-4 flex items-center gap-2">
+        <label htmlFor="q" className="sr-only">Find a client</label>
+        <input id="q" name="q" type="search" defaultValue={q} placeholder="Find a client by name or company"
+          className="w-full max-w-sm rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-accent" />
+        <button type="submit" className="rounded-md border border-border px-3 py-1.5 text-sm">Find</button>
+        {q ? <Link href="/clients" className="text-sm text-muted hover:underline">Clear</Link> : null}
+      </form>
+
       {rows.length === 0 ? (
         <p className="mt-6 rounded-lg border border-border bg-surface px-4 py-6 text-sm text-muted">
-          No clients yet.
+          {q ? 'No client matches.' : 'No clients yet.'}
         </p>
       ) : (
         <div className="mt-6 overflow-x-auto rounded-lg border border-border bg-surface">

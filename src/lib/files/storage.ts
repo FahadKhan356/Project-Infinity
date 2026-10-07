@@ -88,15 +88,20 @@ export function deliverableRelativePath(loc: DeliverableLocation): string {
 
 export interface AttachmentLocation {
   clientId: number;
+  periodYear: number;
+  periodMonth: number;
   projectId: number;
   storageKey: string;
   originalFilename: string;
 }
 
+/** Same Client → Month → Project shape as deliverables (§42); no version level. */
 export function attachmentRelativePath(loc: AttachmentLocation): string {
+  const month = String(loc.periodMonth).padStart(2, '0');
   return path.join(
     'files',
     'clients', String(loc.clientId),
+    `${loc.periodYear}-${month}`,
     'projects', String(loc.projectId),
     'attachments',
     `${loc.storageKey}${safeExtension(loc.originalFilename)}`,
@@ -147,6 +152,33 @@ export function checksumOf(relative: string): Promise<string> {
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
   });
+}
+
+/**
+ * The name a file downloads as. A version gets its number: `Video_Final_v2.mp4`
+ * for the second upload of `Video_Final.mp4` (brief §19), so three versions
+ * saved side by side on a desk do not overwrite one another; a name that
+ * already ends in that suffix is left alone, and an attachment has no version.
+ * With the project code the name is prefixed too — `AKT-2026-0001_Video_Final_v2.mp4`
+ * — so the ID follows the file off the portal (§24) and two clients' "final"
+ * cannot be confused once saved. A name that already starts with the code
+ * is not prefixed twice.
+ */
+export function downloadFilename(
+  originalFilename: string,
+  versionNo: number | null,
+  projectCode: string | null = null,
+): string {
+  let name = originalFilename;
+  if (versionNo !== null) {
+    const dot = name.lastIndexOf('.');
+    const base = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : '';
+    if (!new RegExp(`[_-]v${versionNo}$`, 'i').test(base)) name = `${base}_v${versionNo}${ext}`;
+  }
+  const code = projectCode?.trim();
+  if (code && !name.toLowerCase().startsWith(code.toLowerCase())) name = `${code}_${name}`;
+  return name;
 }
 
 /**

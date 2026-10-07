@@ -7,7 +7,9 @@
  */
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
+import { sql as dsql } from 'drizzle-orm';
 import postgres from 'postgres';
+import type { Actor } from '../src/lib/authz/types';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const skip = DATABASE_URL ? false : 'set DATABASE_URL to a migrated database to run intake tests';
@@ -23,7 +25,7 @@ async function purge() {
   await sql`DELETE FROM projects WHERE client_id IN (SELECT id FROM clients WHERE name LIKE 'M3 Test%')`;
   await sql`DELETE FROM clients WHERE name LIKE 'M3 Test%'`;
   await sql`DELETE FROM users WHERE email LIKE '%@m3test.local'`;
-  await sql`DELETE FROM project_code_sequence WHERE period_year IN (2098, 2099)`;
+  await sql`DELETE FROM project_code_sequence WHERE period_year IN (2066, 2098, 2099)`;
 }
 
 before(async () => {
@@ -305,5 +307,141 @@ describe('filing a project end to end', { skip }, () => {
     const form = new FormData();
     form.append('priceAmount', 'not-a-number');
     assert.throws(() => parseProjectForm(form), /valid price/);
+  });
+});
+
+/**
+ * The rest of what brief §3 lists on the intake form: "other relevant
+ * project information", and the "number of deliverables" as one figure —
+ * the sum of the teams' counts, never a number of its own that could
+ * disagree with them. Year 2066 is this block's; the blocks above keep
+ * 2098 and 2099.
+ */
+describe('intake details (brief §3)', { skip }, () => {
+  let fp: typeof import('../src/lib/projects/file-project');
+  let edit: typeof import('../src/lib/projects/edit');
+  let triage: typeof import('../src/lib/projects/triage');
+  let queries: typeof import('../src/lib/projects/queries');
+  const dept: Record<string, number> = {};
+  let salesActor: Actor;
+  let pmActor: Actor;
+
+  before(async () => {
+    fp = await import('../src/lib/projects/file-project');
+    edit = await import('../src/lib/projects/edit');
+    triage = await import('../src/lib/projects/triage');
+    queries = await import('../src/lib/projects/queries');
+    for (const slug of ['video', 'design']) {
+      dept[slug] = Number((await sql`SELECT id FROM departments WHERE slug = ${slug}`)[0].id);
+    }
+    const [pm] = await sql<{ id: number }[]>`
+      INSERT INTO users (email, password_hash, full_name, role)
+      VALUES ('pm@m3test.local','x','PM','project_manager') RETURNING id`;
+    ids.pm = Number(pm.id);
+    salesActor = {
+      id: ids.sales, email: 'sales@m3test.local', fullName: 'Sales', role: 'sales',
+      isActive: true, mustChangePassword: false,
+      leadDepartmentIds: [], departmentIds: [], permissions: new Set(),
+    };
+    pmActor = {
+      id: ids.pm, email: 'pm@m3test.local', fullName: 'PM', role: 'project_manager',
+      isActive: true, mustChangePassword: false,
+      leadDepartmentIds: [], departmentIds: [], permissions: new Set(),
+    };
+  });
+
+  const baseInput = () => ({
+    clientId: ids.client,
+    period: '2066-03',
+    title: '10 Social Media Videos',
+    departments: [{ departmentId: dept.video, plannedDeliverables: 10 }],
+    priceAmount: '18500.00',
+  });
+
+  /** The expression the projects list and the project page put in their SELECT. */
+  const plannedTotal = async (projectId: number): Promise<number> => {
+    const rows = await getDb().execute<{ n: number }>(dsql`
+      SELECT ${queries.plannedDeliverablesTotal('p')} AS n FROM projects p WHERE p.id = ${projectId}
+    `);
+    return Number(rows[0].n);
+  };
+
+  test('other information is stored at filing and read back', async () => {
+    const filed = await fp.fileProject(salesActor, {
+      ...baseInput(), otherInfo: 'Deliver via WeTransfer; brand kit in Drive',
+    });
+    const [row] = await sql`SELECT other_info FROM projects WHERE id = ${filed.projectId}`;
+    assert.equal(row.other_info, 'Deliver via WeTransfer; brand kit in Drive');
+
+    const plain = await fp.fileProject(salesActor, { ...baseInput(), title: 'Nothing else to say' });
+    const [none] = await sql`SELECT other_info FROM projects WHERE id = ${plain.projectId}`;
+    assert.equal(none.other_info, null, 'omitted means null, never an empty string');
+  });
+
+  test('the intake and edit form parsers read otherInfo', () => {
+    const form = new FormData();
+    form.append('otherInfo', '  keep me ');
+    assert.equal(fp.parseProjectForm(form).otherInfo, 'keep me');
+
+    const blank = new FormData();
+    blank.append('otherInfo', '   ');
+    assert.equal(fp.parseProjectForm(blank).otherInfo, null);
+
+    const editForm = new FormData();
+    editForm.append('title', 'Edited');
+    editForm.append('otherInfo', 'Courier the hard drive back');
+    assert.equal(edit.parseProjectDetailsForm(editForm).otherInfo, 'Courier the hard drive back');
+    assert.equal(edit.DETAIL_LABELS.otherInfo, 'other information');
+  });
+
+  test('editing other information records the change under its label', async () => {
+    const filed = await fp.fileProject(salesActor, { ...baseInput(), title: 'Edit target' });
+    const details = {
+      title: 'Edit target', projectType: null, objective: null, description: null,
+      poReference: null, requirements: null, clientNotes: null, priceAmount: '18500.00',
+      recursMonthly: false, otherInfo: 'Updated',
+    };
+    const first = await edit.editProjectDetails(salesActor, { projectId: filed.projectId, details });
+    assert.deepEqual(first.changed, ['otherInfo']);
+    const [row] = await sql`SELECT other_info FROM projects WHERE id = ${filed.projectId}`;
+    assert.equal(row.other_info, 'Updated');
+
+    // The trap: a column left out of the locking SELECT reads as undefined
+    // and is reported changed on every save, telling everyone each time.
+    const again = await edit.editProjectDetails(salesActor, { projectId: filed.projectId, details });
+    assert.deepEqual(again.changed, [], 'an identical save must change nothing');
+  });
+
+  test('the deliverable total is the sum of the team counts, never a stored number', async () => {
+    const filed = await fp.fileProject(salesActor, {
+      ...baseInput(),
+      title: 'Totals',
+      departments: [
+        { departmentId: dept.video, plannedDeliverables: 10 },
+        { departmentId: dept.design, plannedDeliverables: 20 },
+      ],
+    });
+    assert.equal(await plannedTotal(filed.projectId), 30);
+
+    // The PM's queue spans the whole shared database: pin by id, never count.
+    const queued = (await triage.intakeQueue(pmActor)).find((r) => r.id === filed.projectId);
+    assert.equal(queued?.plannedTotal, 30);
+
+    // Triage changes a team's count; the total follows at once, since it is derived.
+    await triage.triageProject(pmActor, {
+      projectId: filed.projectId,
+      teams: [
+        { departmentId: dept.video, teamLeadId: null, plannedDeliverables: 12 },
+        { departmentId: dept.design, teamLeadId: null, plannedDeliverables: 20 },
+      ],
+    });
+    assert.equal(await plannedTotal(filed.projectId), 32);
+    assert.equal((await triage.intakeQueue(pmActor)).find((r) => r.id === filed.projectId)?.plannedTotal, 32);
+
+    const empty = await fp.fileProject(salesActor, {
+      ...baseInput(), title: 'Nothing planned yet',
+      departments: [{ departmentId: dept.video, plannedDeliverables: 0 }],
+    });
+    assert.equal(await plannedTotal(empty.projectId), 0);
   });
 });

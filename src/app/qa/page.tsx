@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { FileLink } from '@/components/files/file-link';
+import { FilePreview } from '@/components/files/file-preview';
 import { requireActor } from '@/lib/auth/dal';
 import { AccessDenied } from '@/components/access-denied';
 import { AppShell } from '@/components/app-shell';
@@ -14,6 +16,7 @@ import { ReviewForm } from './review-form';
 export default async function QaPage() {
   const actor = await requireActor();
   const reviewsAsPm = can(actor, 'qa.reviewAsProjectManager');
+  const canDownload = can(actor, 'files.download');
   if (actor.leadDepartmentIds.length === 0 && !reviewsAsPm) {
     return (
       <AppShell actor={actor}>
@@ -71,13 +74,13 @@ export default async function QaPage() {
               <div className="grid gap-5 px-5 py-4 lg:grid-cols-2">
                 <div className="text-sm">
                   <div className="text-xs font-medium uppercase tracking-wide text-muted">File to review</div>
-                  <a href={item.downloadUrl} className="mt-1 inline-block font-medium hover:underline">
-                    {item.originalFilename}
-                  </a>
+                  <FileLink href={item.downloadUrl} filename={item.originalFilename} canDownload={canDownload}
+                    className="mt-1 inline-block font-medium hover:underline" />
                   <div className="text-xs text-muted">
                     v{item.versionNo} · {formatBytes(item.sizeBytes)} · uploaded by {item.uploadedBy},{' '}
                     {formatDateTime(item.uploadedAt)}
                   </div>
+                  <FilePreview url={item.downloadUrl} filename={item.originalFilename} />
                   {item.notes ? (
                     <p className="mt-2 whitespace-pre-wrap text-xs text-muted">Uploader’s note: {item.notes}</p>
                   ) : null}

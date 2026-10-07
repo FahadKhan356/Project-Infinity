@@ -3,6 +3,8 @@ import { cookies, headers } from 'next/headers';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { sessions } from '@/db/schema';
+import { sessionCookieSecure } from './cookie-policy';
+import { forwardedAddress } from '@/lib/auth/audit';
 
 export const SESSION_COOKIE = 'aktivacity_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // one working day
@@ -17,8 +19,9 @@ export async function createSession(userId: number): Promise<void> {
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
   const headerList = await headers();
-  const forwardedFor = headerList.get('x-forwarded-for');
-  const ipAddress = forwardedFor?.split(',')[0]?.trim() || null;
+  // The same rule the activity log applies: a hop the inet column would
+  // refuse must not refuse the login.
+  const ipAddress = forwardedAddress(headerList.get('x-forwarded-for'));
 
   const [row] = await db
     .insert(sessions)
@@ -33,8 +36,9 @@ export async function createSession(userId: number): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, row.id, {
     httpOnly: true,
-    // Served over TLS by Caddy on the internal network.
-    secure: process.env.NODE_ENV === 'production',
+    // Secure over HTTPS (Caddy); a plain-HTTP install on the office network
+    // still gets a cookie the browser keeps. See ./cookie-policy.
+    secure: sessionCookieSecure(headerList.get('x-forwarded-proto')),
     sameSite: 'lax',
     path: '/',
     expires: expiresAt,

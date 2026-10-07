@@ -8,6 +8,7 @@ import { AppShell } from '@/components/app-shell';
 import { can, clientScope } from '@/lib/authz';
 import { monthOptions } from '@/lib/projects/intake';
 import { NewProjectForm } from './new-project-form';
+import { getOpportunity } from '@/lib/pipeline/opportunities';
 
 export default async function NewProjectPage(props: PageProps<'/projects/new'>) {
   const actor = await requireActor();
@@ -31,15 +32,21 @@ export default async function NewProjectPage(props: PageProps<'/projects/new'>) 
       .orderBy(asc(departments.sortOrder)),
   ]);
 
-  const { client } = await props.searchParams;
-  const preselected = Number(Array.isArray(client) ? client[0] : client);
+  const { client, opportunity: rawOpportunity } = await props.searchParams;
+  const opportunityId = Number(Array.isArray(rawOpportunity) ? rawOpportunity[0] : rawOpportunity);
+  // Filing from a pipeline deal starts from what Sales already knows (brief §29).
+  const opportunity = Number.isInteger(opportunityId) && opportunityId > 0
+    ? await getOpportunity(actor, opportunityId) : null;
+  const openDeal = opportunity && ['lead', 'qualified', 'proposal', 'negotiation'].includes(opportunity.stage)
+    ? opportunity : null;
+  const preselected = openDeal ? openDeal.clientId : Number(Array.isArray(client) ? client[0] : client);
 
   return (
     <AppShell actor={actor}>
       <Link href="/projects" className="text-sm text-muted hover:text-foreground">← Projects</Link>
       <h1 className="mt-2 text-lg font-semibold tracking-tight">New project</h1>
       <p className="mt-1 max-w-prose text-sm text-muted">
-        Once filed, this appears in the Project Manager’s intake queue for assignment.
+        Once filed, this appears in the Project Manager’s Project Closure Report for assignment.
       </p>
 
       <div className="mt-6 max-w-2xl">
@@ -54,6 +61,10 @@ export default async function NewProjectPage(props: PageProps<'/projects/new'>) 
           canSetPricing={can(actor, 'pricing.view')}
           canCreateClients={can(actor, 'clients.manage')}
           preselectedClientId={Number.isInteger(preselected) ? preselected : null}
+          opportunity={openDeal ? {
+            id: openDeal.id, title: openDeal.title, clientName: openDeal.clientName,
+            value: can(actor, 'pricing.view') && openDeal.estimatedValue !== null ? openDeal.estimatedValue.toFixed(2) : null,
+          } : null}
         />
       </div>
     </AppShell>

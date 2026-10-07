@@ -16,7 +16,9 @@ const skip = DATABASE_URL ? false : 'set DATABASE_URL to a migrated database to 
 let sql: ReturnType<typeof postgres>;
 let triageProject: typeof import('../src/lib/projects/triage').triageProject;
 let TriageError: typeof import('../src/lib/projects/triage').TriageError;
+let intakeQueue: typeof import('../src/lib/projects/triage').intakeQueue;
 let fileProject: typeof import('../src/lib/projects/file-project').fileProject;
+let createAssignment: typeof import('../src/lib/planning/assign').createAssignment;
 
 const ids: Record<string, number> = {};
 
@@ -56,8 +58,9 @@ async function planningRowsFor(userId: number) {
 before(async () => {
   if (skip) return;
   sql = postgres(DATABASE_URL!, { max: 1, onnotice: () => {} });
-  ({ triageProject, TriageError } = await import('../src/lib/projects/triage'));
+  ({ triageProject, TriageError, intakeQueue } = await import('../src/lib/projects/triage'));
   ({ fileProject } = await import('../src/lib/projects/file-project'));
+  ({ createAssignment } = await import('../src/lib/planning/assign'));
   await purge();
   await sql`DELETE FROM project_code_sequence WHERE period_year = 2097`;
 
@@ -310,16 +313,17 @@ describe('the triage form parser', { skip: false }, () => {
     form.append('planned_4', '0');
     form.append('priority', 'urgent');
     form.append('deadline', '2026-09-30');
-    form.append('requiresPmQa', 'on');
+    // PM QA is answered per team (brief §13): a box for team 3, none for 4.
+    form.append('pmqa_3', 'on');
 
     const parsed = mod.parseTriageForm(form);
     assert.equal(parsed.projectId, 12);
     assert.equal(parsed.priority, 'urgent');
     assert.equal(parsed.deadline, '2026-09-30');
-    assert.equal(parsed.requiresPmQa, true);
+    assert.equal(parsed.requiresPmQa, undefined, 'the form carries no project-wide answer');
     assert.deepEqual(parsed.teams, [
-      { departmentId: 3, teamLeadId: 99, plannedDeliverables: 10 },
-      { departmentId: 4, teamLeadId: null, plannedDeliverables: 0 },
+      { departmentId: 3, teamLeadId: 99, plannedDeliverables: 10, requiresPmQa: true },
+      { departmentId: 4, teamLeadId: null, plannedDeliverables: 0, requiresPmQa: false },
     ]);
   });
 });
@@ -360,5 +364,96 @@ describe('the per-team QA policy survives triage (brief §13)', { skip }, () => 
     await route();
     const [row] = await sql`SELECT requires_pm_qa FROM project_departments WHERE project_id = ${filed.projectId}`;
     assert.equal(row.requires_pm_qa, false);
+  });
+});
+
+describe('the intake queue (brief §4, §5)', { skip }, () => {
+  test('holds unrouted projects, and one under way while a team still has no lead', async () => {
+    const pm = actor('project_manager', { id: ids.pm });
+    const filed = await fileProject(actor('sales', { id: ids.sales }), {
+      clientId: ids.client, period: '2097-12', title: 'Under way, half routed',
+      departments: [
+        { departmentId: ids.video, plannedDeliverables: 1 },
+        { departmentId: ids.design, plannedDeliverables: 1 },
+      ],
+    });
+    const queued = async () => (await intakeQueue(pm)).find((p) => p.id === filed.projectId);
+    assert.equal((await queued())?.status, 'new');
+
+    const halfRouted = [
+      { departmentId: ids.video, teamLeadId: ids.leadVideo, plannedDeliverables: 1 },
+      { departmentId: ids.design, teamLeadId: null, plannedDeliverables: 1 },
+    ];
+    await triageProject(pm, { projectId: filed.projectId, teams: halfRouted });
+    assert.equal((await queued())?.unassigned, 1);
+
+    // Work has started on Video: the status follows the work from here
+    // (qa/project-status), so only the missing lead keeps it in the queue.
+    await sql`UPDATE projects SET status = 'in_progress' WHERE id = ${filed.projectId}`;
+    const row = await queued();
+    assert.equal(row?.status, 'in_progress');
+    assert.equal(row?.teams, 'Video, Design');
+
+    await triageProject(pm, {
+      projectId: filed.projectId,
+      teams: [
+        { departmentId: ids.video, teamLeadId: ids.leadVideo, plannedDeliverables: 1 },
+        { departmentId: ids.design, teamLeadId: ids.leadDesign, plannedDeliverables: 1 },
+      ],
+    });
+    assert.equal(await queued(), undefined, 'every team has a lead');
+
+    await triageProject(pm, { projectId: filed.projectId, teams: halfRouted });
+    assert.ok(await queued(), 'a lead taken away puts it back');
+    await sql`UPDATE projects SET status = 'cancelled' WHERE id = ${filed.projectId}`;
+    assert.equal(await queued(), undefined, 'a cancelled project is nobody’s to route');
+  });
+
+  test('and one whose other teams have finished while a routed team has planned nothing', async () => {
+    const pm = actor('project_manager', { id: ids.pm });
+    const leadVideo = actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video], departmentIds: [ids.video] });
+    const leadDesign = actor('team_lead', { id: ids.leadDesign, leadDepartmentIds: [ids.design], departmentIds: [ids.design] });
+    const filed = await fileProject(actor('sales', { id: ids.sales }), {
+      clientId: ids.client, period: '2097-12', title: 'Held up by Design',
+      departments: [
+        { departmentId: ids.video, plannedDeliverables: 1 },
+        { departmentId: ids.design, plannedDeliverables: 1 },
+      ],
+    });
+    await triageProject(pm, {
+      projectId: filed.projectId,
+      teams: [
+        { departmentId: ids.video, teamLeadId: ids.leadVideo, plannedDeliverables: 1 },
+        { departmentId: ids.design, teamLeadId: ids.leadDesign, plannedDeliverables: 1 },
+      ],
+    });
+    const queued = async () => (await intakeQueue(pm)).find((p) => p.id === filed.projectId);
+    assert.equal(await queued(), undefined, 'fully routed: nobody’s to route');
+
+    // Video plans and makes its slot while Design's lead plans nothing. The
+    // slot's progress is set directly; the derivation it stands in for is
+    // covered in status.test.ts.
+    const teamOf = async (departmentId: number) => Number((await sql`
+      SELECT id FROM project_departments WHERE project_id = ${filed.projectId} AND department_id = ${departmentId}`)[0].id);
+    const { deliverableIds: [slot] } = await createAssignment(leadVideo, {
+      projectDepartmentId: await teamOf(ids.video), assigneeId: ids.leadVideo, title: 'Cut', deliverableCount: 1,
+    });
+    await sql`UPDATE projects SET status = 'in_progress' WHERE id = ${filed.projectId}`;
+    assert.equal(await queued(), undefined, 'Video is still making it: Design’s lead has time');
+
+    await sql`UPDATE deliverables SET status = 'approved' WHERE id = ${slot}`;
+    const row = await queued();
+    assert.equal(row?.unplanned, 1, 'the rest is signed off; Design holds it up');
+    assert.equal(row?.unassigned, 0);
+
+    await createAssignment(leadDesign, {
+      projectDepartmentId: await teamOf(ids.design), assigneeId: ids.leadDesign, title: 'Thumb', deliverableCount: 1,
+    });
+    assert.equal(await queued(), undefined, 'planned: the project can finish');
+  });
+
+  test('is the Project Manager’s: Sales and Team Leads get nothing', async () => {
+    assert.deepEqual(await intakeQueue(actor('sales', { id: ids.sales })), []);
+    assert.deepEqual(await intakeQueue(actor('team_lead', { id: ids.leadVideo, leadDepartmentIds: [ids.video] })), []);
   });
 });

@@ -1,9 +1,11 @@
 import { redirect } from 'next/navigation';
 import { getActor } from '@/lib/auth/dal';
+import { homePath } from '@/lib/dashboard/home';
 import { LoginForm } from './login-form';
 
 export default async function LoginPage() {
-  if (await getActor()) redirect('/dashboard');
+  const actor = await getActor();
+  if (actor) redirect(homePath(actor.role));
 
   return (
     <main className="flex min-h-svh items-center justify-center px-6 py-12">

@@ -1,9 +1,17 @@
 import Link from 'next/link';
+import { formatMinutes } from '@/lib/time/format';
+import { FileLink } from '@/components/files/file-link';
+import { FilePreview } from '@/components/files/file-preview';
 import type { Actor } from '@/lib/authz';
-import { can } from '@/lib/authz';
+import { canPlanTeam } from '@/lib/authz';
 import { formatBytes, formatDateTime, statusLabel } from '@/lib/workspace/format';
-import type { Workspace, WorkspaceDeliverable, WorkspaceTeam } from '@/lib/workspace/workspace';
-import { CommentForm } from './comment-form';
+import type { Workspace, WorkspaceDeliverable, WorkspaceTeam, WorkspaceVersion } from '@/lib/workspace/workspace';
+import type { ProjectAttachment } from '@/lib/files/attachments';
+import { mayAttachToAssignment } from '@/lib/files/access';
+import { AttachButton } from '@/components/files/attach-button';
+import { AttachmentList } from '@/components/files/attachment-list';
+import { DeleteFileButton } from '@/components/files/delete-file-button';
+import { CommentForm, VersionCommentForm } from './comment-form';
 import { UploadButton } from './upload-button';
 
 /**
@@ -11,10 +19,45 @@ import { UploadButton } from './upload-button';
  * is doing what, each slot with its versions, and the thread. The same
  * component serves every role — what differs is which upload buttons appear.
  */
-export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace: Workspace }) {
+export function WorkspaceSection({
+  actor, workspace, attachments, canAttach, canDelete: mayDelete, canDownload, canComment, canRevise,
+}: {
+  actor: Actor;
+  workspace: Workspace;
+  attachments: ProjectAttachment[];
+  /**
+   * False while the month is closed or the project is held, cancelled or
+   * completed — and for a rep the project is only shared with (§23).
+   */
+  canAttach: boolean;
+  /**
+   * Holds files.delete on a project that is theirs to work on — not one
+   * merely shared with them (§23), where DELETE /api/files refuses too.
+   */
+  canDelete: boolean;
+  /**
+   * Holds files.download (§43): file names link to the bytes. Without it
+   * they are plain text — Preview and inline viewing stay.
+   */
+  canDownload: boolean;
+  /** False for a rep the project is only shared with: they read the thread, they do not join it (§23). */
+  canComment: boolean;
+  /**
+   * Whether this person may open a revision here (§15): the project's own
+   * Sales rep, not a rep it is merely shared with (§23), who reads it only.
+   */
+  canRevise: boolean;
+}) {
   const readOnly = workspace.monthClosed;
+  const canDelete = !readOnly && mayDelete;
+  // The version threads (§10, §19) take the same rule as the project thread below.
+  const mayComment = !readOnly && canComment;
+  const references = (assignmentId: number) =>
+    attachments.filter((a) => a.parent.kind === 'assignment' && a.parent.id === assignmentId);
+  // The same rule the planning page and createAssignment apply (§6, §7): a
+  // co-lead of the department plans the team too, once it has a lead.
   const mayPlan = (team: WorkspaceTeam) =>
-    !readOnly && (team.teamLeadId === actor.id || can(actor, 'planning.viewAllDepartments'));
+    !readOnly && canPlanTeam(actor, { departmentId: team.departmentId, teamLeadId: team.teamLeadId });
 
   const allSlots = workspace.teams.flatMap((t) =>
     t.deliverables.map((d) => ({ id: d.id, label: `${t.department} — ${d.name}` })),
@@ -31,7 +74,7 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
               their slot as numbered versions; a new upload never replaces an old one.
             </p>
           </div>
-          {!readOnly && can(actor, 'revisions.create') && allSlots.length > 0 ? (
+          {!readOnly && canRevise && allSlots.length > 0 ? (
             <Link href={`/projects/${workspace.projectId}/revisions/new`}
               className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-background">
               Open a revision
@@ -44,9 +87,17 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
             {workspace.revisions.map((r) => (
               <li key={r.id} className={`flex flex-wrap items-baseline gap-x-3 rounded-md border px-3 py-2 text-xs ${
                 r.status === 'closed' || r.status === 'cancelled' ? 'border-border text-muted' : 'border-accent/40 bg-accent/5'}`}>
-                <Link href={`/revisions/${r.id}`} className="font-medium hover:underline">
-                  Revision #{String(r.revisionNo).padStart(2, '0')} — {r.title}
-                </Link>
+                {/* An Executive reads a previous project's revisions here (§8) but
+                    opens only those on their current work (§16): no dead link. */}
+                {r.canOpen ? (
+                  <Link href={`/revisions/${r.id}`} className="font-medium hover:underline">
+                    Revision #{String(r.revisionNo).padStart(2, '0')} — {r.title}
+                  </Link>
+                ) : (
+                  <span className="font-medium">
+                    Revision #{String(r.revisionNo).padStart(2, '0')} — {r.title}
+                  </span>
+                )}
                 <span>{r.deliverableNames.join(', ')}</span>
                 <span className="ml-auto">{statusLabel(r.status)}{r.deadline ? ` · due ${r.deadline}` : ''}</span>
               </li>
@@ -60,12 +111,15 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
           </p>
         ) : (
           workspace.teams.map((team) => (
-            <TeamBlock key={team.projectDepartmentId} team={team} canPlan={mayPlan(team)} />
+            <TeamBlock key={team.projectDepartmentId} team={team} canPlan={mayPlan(team)}
+              projectId={workspace.projectId} references={references} canDelete={canDelete}
+              canDownload={canDownload} canComment={mayComment}
+              mayAttach={(a) => canAttach && mayAttachToAssignment(actor, { assigneeId: a.assigneeId, departmentId: team.departmentId })} />
           ))
         )}
       </section>
 
-      <section className="mt-8">
+      <section id="comments" className="mt-8 scroll-mt-6">
         <h2 className="text-sm font-semibold">Comments</h2>
         {workspace.comments.length === 0 ? (
           <p className="mt-3 text-sm text-muted">Nothing said yet.</p>
@@ -85,6 +139,8 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
         )}
         {readOnly ? (
           <p className="mt-3 text-xs text-muted">The thread is closed with the month.</p>
+        ) : !canComment ? (
+          <p className="mt-3 text-xs text-muted">This project is shared with you to view; the thread is read-only.</p>
         ) : (
           <CommentForm projectId={workspace.projectId} deliverables={allSlots} />
         )}
@@ -93,7 +149,17 @@ export function WorkspaceSection({ actor, workspace }: { actor: Actor; workspace
   );
 }
 
-function TeamBlock({ team, canPlan }: { team: WorkspaceTeam; canPlan: boolean }) {
+function TeamBlock({ team, canPlan, projectId, references, canDelete, canDownload, canComment, mayAttach }: {
+  team: WorkspaceTeam;
+  canPlan: boolean;
+  projectId: number;
+  references: (assignmentId: number) => ProjectAttachment[];
+  canDelete: boolean;
+  canDownload: boolean;
+  /** Whether the version threads (§10, §19) take a new comment from this person now. */
+  canComment: boolean;
+  mayAttach: (assignment: WorkspaceTeam['assignments'][number]) => boolean;
+}) {
   const approved = team.deliverables.filter((d) => d.status === 'approved' || d.status === 'delivered').length;
 
   return (
@@ -133,10 +199,28 @@ function TeamBlock({ team, canPlan }: { team: WorkspaceTeam; canPlan: boolean })
                 <div className="text-xs text-muted">
                   {a.startDate ?? '—'} → {a.endDate ?? '—'} · {a.priority} · {statusLabel(a.status)}
                   {' · '}<span className="tabular-nums">{a.approved}/{a.total}</span>
+                  {/* Progress counts approved slots; the uploads say how far the work itself is (§7, §11). */}
+                  {' · '}<span className="tabular-nums">{a.uploaded}/{a.total} uploaded</span>
+                  {a.effort && (a.effort.loggedMinutes > 0 || a.effort.estimatedMinutes !== null) ? (
+                    <>
+                      {' · '}
+                      <span className={`tabular-nums ${a.effort.estimatedMinutes !== null
+                        && a.effort.loggedMinutes > a.effort.estimatedMinutes ? 'text-red-600 dark:text-red-400' : ''}`}>
+                        {formatMinutes(a.effort.loggedMinutes)} logged
+                        {a.effort.estimatedMinutes !== null ? ` of ${formatMinutes(a.effort.estimatedMinutes)}` : ''}
+                      </span>
+                    </>
+                  ) : null}
                 </div>
               </div>
               {a.instructions ? (
                 <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{a.instructions}</p>
+              ) : null}
+              {references(a.id).length > 0 || mayAttach(a) ? (
+                <div className="mt-2 flex flex-wrap items-start gap-x-4 gap-y-1">
+                  <AttachmentList items={references(a.id)} canDelete={canDelete} canDownload={canDownload} />
+                  {mayAttach(a) ? <AttachButton projectId={projectId} assignmentId={a.id} label="Add references" /> : null}
+                </div>
               ) : null}
             </li>
           ))}
@@ -158,7 +242,10 @@ function TeamBlock({ team, canPlan }: { team: WorkspaceTeam; canPlan: boolean })
             </tr>
           </thead>
           <tbody>
-            {team.deliverables.map((d) => <SlotRow key={d.id} slot={d} />)}
+            {team.deliverables.map((d) => (
+              <SlotRow key={d.id} slot={d} projectId={projectId} canDelete={canDelete}
+                canDownload={canDownload} canComment={canComment} />
+            ))}
           </tbody>
         </table>
       )}
@@ -166,7 +253,52 @@ function TeamBlock({ team, canPlan }: { team: WorkspaceTeam; canPlan: boolean })
   );
 }
 
-function SlotRow({ slot }: { slot: WorkspaceDeliverable }) {
+/**
+ * What a version was judged, what its uploader said about it, and the thread
+ * on it (§10, §19). Anchored by version id, so a notice about a comment
+ * lands on the version it was left on.
+ */
+function VersionHistory({ version, projectId, canComment }: {
+  version: WorkspaceVersion;
+  projectId: number;
+  canComment: boolean;
+}) {
+  if (!version.notes && version.reviews.length === 0 && version.comments.length === 0 && !canComment) return null;
+  return (
+    <ul id={`version-${version.id}`} className="ml-3 mt-0.5 scroll-mt-6 space-y-0.5 border-l border-border pl-2">
+      {version.notes ? (
+        <li className="whitespace-pre-wrap">
+          <span className="font-medium text-foreground">{version.uploadedBy}:</span> {version.notes}
+        </li>
+      ) : null}
+      {version.reviews.map((r, i) => (
+        <li key={i} className="whitespace-pre-wrap">
+          <span className="font-medium text-foreground">{r.reviewer}</span>
+          {' '}
+          {r.decision === 'approved' ? 'approved' : r.decision === 'rejected' ? 'rejected' : 'requested changes'}
+          {r.stage === 'project_manager' ? ' (PM QA)' : ''}, {formatDateTime(r.reviewedAt)}
+          {r.comments ? <>: {r.comments}</> : null}
+        </li>
+      ))}
+      {version.comments.map((c) => (
+        <li key={c.id} className="whitespace-pre-wrap">
+          <span className="font-medium text-foreground">{c.author}</span>, {formatDateTime(c.createdAt)}: {c.body}
+        </li>
+      ))}
+      {canComment ? (
+        <li><VersionCommentForm projectId={projectId} versionId={version.id} /></li>
+      ) : null}
+    </ul>
+  );
+}
+
+function SlotRow({ slot, projectId, canDelete, canDownload, canComment }: {
+  slot: WorkspaceDeliverable;
+  projectId: number;
+  canDelete: boolean;
+  canDownload: boolean;
+  canComment: boolean;
+}) {
   const current = slot.currentVersion;
   const nextVersion = (current?.versionNo ?? 0) + 1;
 
@@ -183,14 +315,24 @@ function SlotRow({ slot }: { slot: WorkspaceDeliverable }) {
         </span>
         {slot.openRevision ? (
           <div className="mt-1 max-w-xs rounded-md border border-accent/40 bg-accent/5 px-2 py-1 text-xs">
-            <Link href={`/revisions/${slot.openRevision.id}`} className="font-medium hover:underline">
-              Revision #{String(slot.openRevision.revisionNo).padStart(2, '0')}
-            </Link>
+            {slot.openRevision.canOpen ? (
+              <Link href={`/revisions/${slot.openRevision.id}`} className="font-medium hover:underline">
+                Revision #{String(slot.openRevision.revisionNo).padStart(2, '0')}
+              </Link>
+            ) : (
+              <span className="font-medium">
+                Revision #{String(slot.openRevision.revisionNo).padStart(2, '0')}
+              </span>
+            )}
             {slot.openRevision.deadline ? <span className="text-muted"> · due {slot.openRevision.deadline}</span> : null}
             <p className="mt-0.5 whitespace-pre-wrap text-muted">{slot.openRevision.clientFeedback}</p>
           </div>
         ) : null}
-        {slot.lastReview && !(slot.openRevision && slot.status === 'changes_requested' && slot.lastReview.decision === 'approved') ? (
+        {/* The newest verdict, when it is about an earlier version than the
+            one now on the slot — a v2 waiting on QA still shows why v1 came
+            back. A verdict on the current version sits under the file. */}
+        {slot.lastReview && slot.lastReview.versionNo !== current?.versionNo
+          && !(slot.openRevision && slot.status === 'changes_requested' && slot.lastReview.decision === 'approved') ? (
           <div className="mt-1 max-w-xs text-xs text-muted">
             <span className="font-medium text-foreground">{slot.lastReview.reviewer}</span>
             {' '}
@@ -205,13 +347,19 @@ function SlotRow({ slot }: { slot: WorkspaceDeliverable }) {
       <td className="px-4 py-2.5">
         {current ? (
           <>
-            <a href={current.downloadUrl} className="hover:underline">
-              {current.originalFilename}
-            </a>
+            <FileLink href={current.downloadUrl} filename={current.originalFilename} canDownload={canDownload} />
             <div className="text-xs text-muted">
               v{current.versionNo} · {formatBytes(current.sizeBytes)} · {current.uploadedBy},{' '}
               {formatDateTime(current.uploadedAt)}
+              {canDelete ? <> · <DeleteFileButton downloadUrl={current.downloadUrl} filename={current.originalFilename} /></> : null}
             </div>
+            {/* The uploader's note, every QA round on this version (§19) —
+                so a lead's approval is still there once the PM has rejected
+                it — and the thread on it (§10). */}
+            <div className="max-w-xs text-xs text-muted">
+              <VersionHistory version={current} projectId={projectId} canComment={canComment} />
+            </div>
+            <FilePreview url={current.downloadUrl} filename={current.originalFilename} mimeType={current.mimeType} />
             {slot.versions.length > 1 ? (
               <details className="mt-1 text-xs">
                 <summary className="cursor-pointer text-muted">
@@ -224,9 +372,11 @@ function SlotRow({ slot }: { slot: WorkspaceDeliverable }) {
                       {v.isDeleted ? (
                         <span className="line-through">{v.originalFilename}</span>
                       ) : (
-                        <a href={v.downloadUrl} className="hover:underline">{v.originalFilename}</a>
+                        <FileLink href={v.downloadUrl} filename={v.originalFilename} canDownload={canDownload} />
                       )}
                       {' '}· {v.uploadedBy}, {formatDateTime(v.uploadedAt)}
+                      {canDelete && !v.isDeleted ? <> · <DeleteFileButton downloadUrl={v.downloadUrl} filename={v.originalFilename} /></> : null}
+                      <VersionHistory version={v} projectId={projectId} canComment={canComment} />
                     </li>
                   ))}
                 </ul>

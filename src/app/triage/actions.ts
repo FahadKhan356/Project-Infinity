@@ -53,10 +53,14 @@ export async function submitTriage(
   revalidatePath('/planning');
   revalidatePath(`/projects/${result.projectId}`);
 
+  // Once work has started the status follows it, so ask the teams, not the status.
+  const unrouted = result.totalTeams - result.assignedTeams;
   return {
     notice:
-      result.status === 'planned'
-        ? 'Assigned. Every team now has a lead and the project is ready to plan.'
-        : `Saved. ${result.totalTeams - result.assignedTeams} team(s) still need a lead.`,
+      unrouted > 0
+        ? `Saved. ${unrouted} team(s) still need a lead.`
+        : result.status === 'planned'
+          ? 'Assigned. Every team now has a lead and the project is ready to plan.'
+          : 'Assigned. Every team now has a lead.',
   };
 }

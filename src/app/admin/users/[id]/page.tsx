@@ -9,6 +9,8 @@ import { AppShell } from '@/components/app-shell';
 import { can } from '@/lib/authz';
 import { loadUserDetail } from '../actions';
 import { EditUserForms } from './edit-user-forms';
+import { CostRatePanel } from './cost-rate-panel';
+import { costRates } from '@/lib/costs/rates';
 
 export default async function UserDetailPage(props: PageProps<'/admin/users/[id]'>) {
   const actor = await requireActor();
@@ -27,6 +29,7 @@ export default async function UserDetailPage(props: PageProps<'/admin/users/[id]
   const detail = await loadUserDetail(userId);
   if (!detail) notFound();
 
+  const rates = await costRates(actor, userId);
   const allDepartments = await getDb()
     .select({ id: departments.id, name: departments.name, isProduction: departments.isProduction })
     .from(departments)
@@ -52,6 +55,10 @@ export default async function UserDetailPage(props: PageProps<'/admin/users/[id]
         grants={detail.grants}
         departments={allDepartments}
       />
+
+      {rates !== null ? (
+        <CostRatePanel userId={detail.user.id} rates={rates} today={new Date().toISOString().slice(0, 10)} />
+      ) : null}
     </AppShell>
   );
 }

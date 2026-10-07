@@ -5,6 +5,7 @@ import { requireActor } from '@/lib/auth/dal';
 import { AppShell } from '@/components/app-shell';
 import { can, projectScope } from '@/lib/authz';
 import { formatMoney, formatMonth } from '@/lib/projects/intake';
+import { plannedDeliverablesTotal } from '@/lib/projects/queries';
 
 export default async function ProjectsPage() {
   const actor = await requireActor();
@@ -14,7 +15,7 @@ export default async function ProjectsPage() {
     id: number; project_code: string; title: string; status: string; priority: string;
     deadline: string | null; client_name: string; period_year: number; period_month: number;
     teams: string | null; price_amount: string | null; price_currency: string;
-    total: number; approved: number;
+    planned_total: number; total: number; approved: number;
   }>(sql`
     SELECT p.id, p.project_code, p.title, p.status, p.priority, p.deadline,
            c.name AS client_name, cm.period_year, cm.period_month,
@@ -23,12 +24,13 @@ export default async function ProjectsPage() {
            (SELECT string_agg(d.name, ', ' ORDER BY d.sort_order)
               FROM project_departments pd JOIN departments d ON d.id = pd.department_id
              WHERE pd.project_id = p.id) AS teams,
+           ${plannedDeliverablesTotal('p')} AS planned_total,
            prog.total, prog.approved
     FROM projects p
     JOIN clients c        ON c.id = p.client_id
     JOIN client_months cm ON cm.id = p.client_month_id
     JOIN v_project_progress prog ON prog.project_id = p.id
-    WHERE ${projectScope(actor, 'p')}
+    WHERE ${projectScope(actor, 'p', { shared: true })}
     ORDER BY p.created_at DESC
   `);
 
@@ -60,6 +62,7 @@ export default async function ProjectsPage() {
                 <th className="px-4 py-2.5 font-medium">Month</th>
                 <th className="px-4 py-2.5 font-medium">Teams</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
+                <th className="px-4 py-2.5 font-medium text-right">Deliverables</th>
                 <th className="px-4 py-2.5 font-medium text-right">Progress</th>
                 <th className="px-4 py-2.5 font-medium">Deadline</th>
                 {showPricing ? <th className="px-4 py-2.5 font-medium text-right">Price</th> : null}
@@ -78,6 +81,7 @@ export default async function ProjectsPage() {
                   </td>
                   <td className="px-4 py-2.5 text-muted">{p.teams ?? '—'}</td>
                   <td className="px-4 py-2.5">{p.status.replace(/_/g, ' ')}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-muted">{Number(p.planned_total)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-muted">
                     {Number(p.approved)}/{Number(p.total)}
                   </td>

@@ -17,17 +17,25 @@ const LABELS: Record<string, string> = {
 
 interface Props {
   deliveryId: number;
+  /** Where the delivery stands now. */
+  status: string;
   /** The statuses this delivery may move to from where it is. */
   next: string[];
   notes: string | null;
   clientFeedback: string | null;
 }
 
-export function DeliveryForm({ deliveryId, next, notes, clientFeedback }: Props) {
+export function DeliveryForm({ deliveryId, status, next, notes, clientFeedback }: Props) {
   const [state, formAction, pending] = useActionState(submitDeliveryUpdate, initial);
 
   if (next.length === 0) {
-    return <p className="text-xs text-muted">Completed. Nothing further to record.</p>;
+    return (
+      <p className="text-xs text-muted">
+        {status === 'revision_required'
+          ? 'Being revised. The reworked file will arrive here as a new delivery once it clears QA; a revision ended before then gives this one back its delivered state.'
+          : 'Completed. Nothing further to record.'}
+      </p>
+    );
   }
 
   return (

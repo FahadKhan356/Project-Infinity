@@ -13,13 +13,20 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # No network calls at build time: system fonts only, never next/font/google,
 # so this image can also be built on a machine without internet access.
+# Standalone output is opt-in (next.config.ts): the runner stage needs it.
+ENV NEXT_OUTPUT_STANDALONE=1
 RUN npm run build
 
 # ------------------------------------------------------------ migrator ------
 # Keeps the full toolchain (tsx and its own dependencies) so the migration and
-# seed scripts run as written. Short-lived: it is not the service image.
+# seed scripts run as written. Not the app's service image: `migrate` and the
+# one-off ops services run it briefly, and `scheduler` runs its crond from it.
 FROM build AS migrator
 WORKDIR /app
+# The `scheduler` service runs busybox crond from this image with
+# TZ=BACKUP_TZ; a zone name only applies with tzdata installed (the backup
+# image installs it for the same reason).
+RUN apk add --no-cache tzdata
 CMD ["npx", "tsx", "scripts/migrate.ts"]
 
 # ------------------------------------------------------------- runtime ------

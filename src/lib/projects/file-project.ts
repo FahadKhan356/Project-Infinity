@@ -5,6 +5,7 @@ import type { Actor } from '@/lib/authz';
 import { can } from '@/lib/authz';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { onProjectFiled } from '@/lib/notifications/notify';
+import { PipelineError, winOpportunity } from '@/lib/pipeline/opportunities';
 import { allocateProjectCode, parseMonthValue, resolveClientMonth } from './intake';
 import { isClientVisible } from './queries';
 
@@ -13,22 +14,42 @@ type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 
+/** One team on a filed project. */
+export interface IntakeDepartment {
+  departmentId: number;
+  plannedDeliverables: number;
+  /**
+   * This team's QA route (brief §13). The intake form never sends it — Sales
+   * answers once for the whole project — so a team filed without it takes
+   * the project's default. A month copy sets it per team, so the route the
+   * PM chose for one team survives the copy.
+   */
+  requiresPmQa?: boolean;
+}
+
 export interface ProjectIntakeInput {
   clientId: number;
   period: string;
   title: string;
-  departments: { departmentId: number; plannedDeliverables: number }[];
+  departments: IntakeDepartment[];
   projectType?: string | null;
   objective?: string | null;
   description?: string | null;
   poReference?: string | null;
   requirements?: string | null;
   clientNotes?: string | null;
+  /** "Other relevant project information" (brief §3). */
+  otherInfo?: string | null;
   internalNotes?: string | null;
   deadline?: string | null;
   priority?: Priority;
   priceAmount?: string | null;
+  /** The QA route Sales chose at intake (brief §13): the default for every team that does not say for itself. */
   requiresPmQa?: boolean;
+  /** Copied into each new month by the nightly job (brief §29, recurring projects). */
+  recursMonthly?: boolean;
+  /** Filing this project wins that pipeline opportunity (brief §29). */
+  opportunityId?: number | null;
 }
 
 export interface IntakeResult {
@@ -84,6 +105,17 @@ export async function fileProject(
       year: period.year,
     });
 
+    if (input.opportunityId != null) {
+      try {
+        await winOpportunity(tx, actor, {
+          opportunityId: input.opportunityId, clientId: input.clientId, projectId: project.projectId,
+        });
+      } catch (error) {
+        if (error instanceof PipelineError) throw new IntakeError(error.message);
+        throw error;
+      }
+    }
+
     return {
       projectId: project.projectId,
       projectCode: project.projectCode,
@@ -127,6 +159,8 @@ export async function insertProject(
   // Pricing is only accepted from someone allowed to see it, so a replayed
   // form cannot set a price its sender was never shown (brief §23).
   const priceAmount = can(actor, 'pricing.view') ? (input.priceAmount ?? null) : null;
+  // The project's intake default (brief §13): what every team row is seeded
+  // with unless the caller says otherwise for that team.
   const requiresPmQa = input.requiresPmQa ?? true;
 
   const projectCode = await allocateProjectCode(tx, input.year);
@@ -144,6 +178,7 @@ export async function insertProject(
       poReference: input.poReference ?? null,
       requirements: input.requirements ?? null,
       clientNotes: input.clientNotes ?? null,
+      otherInfo: input.otherInfo ?? null,
       internalNotes: input.internalNotes ?? null,
       deadline: input.deadline ?? null,
       priority: input.priority ?? 'normal',
@@ -151,6 +186,7 @@ export async function insertProject(
       salesOwnerId: actor.id,
       requiresPmQa,
       copiedFromProjectId: input.copiedFromProjectId ?? null,
+      recursMonthly: input.recursMonthly ?? false,
       createdBy: actor.id,
     })
     .returning({ id: projects.id, projectCode: projects.projectCode });
@@ -164,7 +200,7 @@ export async function insertProject(
       projectId: project.id,
       departmentId: d.departmentId,
       plannedDeliverables: Math.max(0, d.plannedDeliverables | 0),
-      requiresPmQa,
+      requiresPmQa: d.requiresPmQa ?? requiresPmQa,
     }));
   await tx.insert(projectDepartments).values(rows);
 
@@ -211,10 +247,14 @@ export function parseProjectForm(formData: FormData): ProjectIntakeInput {
     poReference: text('poReference'),
     requirements: text('requirements'),
     clientNotes: text('clientNotes'),
+    otherInfo: text('otherInfo'),
     internalNotes: text('internalNotes'),
     deadline: text('deadline'),
     priority,
     priceAmount,
     requiresPmQa: formData.get('requiresPmQa') === 'on',
+    recursMonthly: formData.get('recursMonthly') === 'on',
+    opportunityId: Number.isInteger(Number(formData.get('opportunityId'))) && formData.get('opportunityId')
+      ? Number(formData.get('opportunityId')) : null,
   };
 }

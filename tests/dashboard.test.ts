@@ -50,6 +50,7 @@ async function purge() {
   await sql`DELETE FROM department_members WHERE user_id IN (${users})`;
   await sql`DELETE FROM users WHERE email LIKE '%@m12test.local'`;
   await sql`DELETE FROM project_code_sequence WHERE period_year = 2088`;
+  await sql`DELETE FROM project_code_sequence WHERE period_year = 2078`;
 }
 
 before(async () => {
@@ -173,6 +174,56 @@ before(async () => {
   });
   ids.projectE = e.projectId;
   await sql`UPDATE projects SET status = 'completed', completed_at = now() WHERE id = ${ids.projectE}`;
+
+  // F: Design only, four banners by Sara, each approved by the lead alone
+  //    (no PM stage), so every approval wrote a deliveries row — the raw
+  //    material of department performance (§21). Once the approvals are in,
+  //    the project deadline is moved to ten days ago, so the two undated
+  //    banners are judged by a deadline it was actually possible to miss:
+  //      [0] due 50 days ago, approved 40 days ago → late; inside the 90-day
+  //          on-time window but outside the 30-day throughput window;
+  //      [1] due next week, approved today → on time;
+  //      [2] no due date, approved 20 days ago → by the project deadline
+  //          (10 days ago) → on time;
+  //      [3] no due date, approved today → by the project deadline → late.
+  //    Reading an undated slot as always on time gives 3 of 4, as always
+  //    late 1 of 4, and leaving undated slots out 1 of 2; only the fallback
+  //    to the deadline gives 2 of 4.
+  //    All date arithmetic is done in SQL with margins of a week or more, so
+  //    the DB session's calendar and the machine's cannot disagree.
+  const f = await fileProject(sales(), {
+    clientId: ids.client, period: '2078-09', title: 'F banners', requiresPmQa: false, deadline: '2078-09-30',
+    departments: [{ departmentId: ids.design, plannedDeliverables: 4 }],
+  });
+  ids.projectF = f.projectId;
+  await route(ids.projectF, [{ slug: 'design', lead: 'leadDesign', n: 4 }]);
+  const df = await createAssignment(leadDesign(), {
+    projectDepartmentId: await teamOf(ids.projectF, 'design'), assigneeId: ids.sara, title: 'Banners', deliverableCount: 4,
+  });
+  await sql`UPDATE deliverables SET due_date = current_date - 50 WHERE id = ${df.deliverableIds[0]}`;
+  await sql`UPDATE deliverables SET due_date = current_date + 7 WHERE id = ${df.deliverableIds[1]}`;
+  for (const [i, id] of df.deliverableIds.entries()) {
+    await upload(sara(), id, `banner-${i + 1}.png`);
+    await reviewDeliverable(leadDesign(), { deliverableId: id, decision: 'approved' });
+  }
+  await sql`UPDATE deliveries SET approved_at = now() - interval '40 days' WHERE deliverable_id = ${df.deliverableIds[0]}`;
+  await sql`UPDATE deliveries SET approved_at = now() - interval '20 days' WHERE deliverable_id = ${df.deliverableIds[2]}`;
+  await sql`UPDATE projects SET deadline = current_date - 10 WHERE id = ${ids.projectF}`;
+
+  // G: Design only, no project deadline, one banner by Sara with no due
+  //    date, approved today: nothing to judge it by, so it counts toward
+  //    throughput and is left out of the on-time rate.
+  const g = await fileProject(sales(), {
+    clientId: ids.client, period: '2078-10', title: 'G banner', requiresPmQa: false,
+    departments: [{ departmentId: ids.design, plannedDeliverables: 1 }],
+  });
+  ids.projectG = g.projectId;
+  await route(ids.projectG, [{ slug: 'design', lead: 'leadDesign', n: 1 }]);
+  const dg = await createAssignment(leadDesign(), {
+    projectDepartmentId: await teamOf(ids.projectG, 'design'), assigneeId: ids.sara, title: 'G banner', deliverableCount: 1,
+  });
+  await upload(sara(), dg.deliverableIds[0], 'g.png');
+  await reviewDeliverable(leadDesign(), { deliverableId: dg.deliverableIds[0], decision: 'approved' });
 });
 
 after(async () => {
@@ -192,15 +243,15 @@ async function scoped(who: Actor) {
 describe('the Sales dashboard (brief §21, §23)', { skip }, () => {
   test('counts the rep’s projects by where they stand, with value', async () => {
     const d = await scoped(sales());
-    assert.equal(d.counts.total, 5);
-    assert.equal(d.counts.active, 4);
+    assert.equal(d.counts.total, 7);
+    assert.equal(d.counts.active, 6, 'A, B, C, D, F and G; E is completed');
     assert.equal(d.counts.new, 1, 'C');
     assert.equal(d.counts.planned, 1, 'B');
     assert.equal(d.counts.inRevision, 1, 'A');
     assert.equal(d.counts.inQa, 2, 'A (thumbnail) and D (PM stage)');
     assert.equal(d.counts.completed, 1, 'E');
-    assert.equal(d.counts.delayed, 1, 'A is past its deadline');
-    assert.equal(d.pendingDeliveries, 0, 'D is still at PM QA');
+    assert.equal(d.counts.delayed, 2, 'A and F are past their deadlines with files still to deliver');
+    assert.equal(d.pendingDeliveries, 5, 'F’s four banners and G’s one wait for Sales; D is still at PM QA');
     assert.equal(d.openRevisions, 1);
     assert.ok(d.value, 'Sales may see pricing');
     assert.equal(d.value!.active, '16500.00', 'A + B + C; E is completed');
@@ -291,10 +342,65 @@ describe('the Executive dashboard', { skip }, () => {
 
   test('Sara sees only her own slot', async () => {
     const d = await scoped(sara());
-    assert.equal(d.executive!.activeAssignments, 1);
+    assert.equal(d.executive!.activeAssignments, 1, 'Thumb; the F and G assignments closed when their last slots were signed off');
     assert.equal(d.executive!.inQa, 1);
-    assert.equal(d.executive!.completedDeliverables, 0);
+    assert.equal(d.executive!.completedDeliverables, 5, 'F’s four banners and G’s one');
     assert.equal(d.openRevisions, 1, 'she is on project A, so she sees its revision (§16)');
     assert.deepEqual(d.deadlines, []);
+  });
+});
+
+/**
+ * Department performance (brief §21): throughput is slots approved in the
+ * last 30 days; the on-time rate is the share of the last 90 days' approvals
+ * that met the slot's due date, or the project deadline when the slot has
+ * none (a slot with neither is not measured). An approval is a deliveries
+ * row, so a file later sent back for revision still counts as having been
+ * approved on time.
+ */
+describe('department performance (brief §21)', { skip }, () => {
+  test('on-time rate and throughput per department, over the rep’s own projects', async () => {
+    const d = await scoped(sales());
+    const by = new Map(d.departments.map((t) => [t.name, t]));
+
+    // F's deadline is ten days past, so its two undated banners land on
+    // either side of it: [2] approved before it, [3] after. G's banner has
+    // no date at all. See the fixture for what each wrong reading would give.
+    const design = by.get('Design')!;
+    assert.equal(design.throughput, 4, 'F [1], [2], [3] and G were approved within 30 days; F [0], 40 days ago, is outside the window');
+    assert.equal(design.onTimeMeasured, 4, 'F [0] and [1] by their due date, F [2] and [3] by the project deadline; G, with neither, is not measured');
+    assert.equal(design.onTime, 2, 'F [1] met its due date and F [2] the deadline; [0] was ten days late and [3] came after the deadline');
+    assert.equal(design.onTimeRate, 50, '2 of 4');
+
+    const video = by.get('Video')!;
+    assert.equal(video.throughput, 1, 'A’s first video, approved today; D is still at PM QA and the second video was sent back');
+    assert.equal(video.onTimeMeasured, 1);
+    assert.equal(video.onTime, 1, 'due 2088-09-01; the revision that later reopened it does not undo the approval');
+    assert.equal(video.onTimeRate, 100);
+
+    const development = by.get('Development')!;
+    assert.equal(development.throughput, 0);
+    assert.equal(development.onTimeMeasured, 0);
+    assert.equal(development.onTime, 0);
+    assert.equal(development.onTimeRate, null, 'nothing approved reads n/a, not 0%');
+  });
+
+  test('management sees the figures over every project', async () => {
+    // Every suite's and the demo's approvals share this window, so these
+    // are lower bounds; the exact figures are pinned through the rep above.
+    const d = await scoped(actor('ceo'));
+    const design = d.departments.find((t) => t.name === 'Design')!;
+    assert.ok(design.onTimeMeasured >= 4, 'F’s four banners at least');
+    assert.ok(design.onTime >= 2, 'F [1] and [2] at least');
+    assert.ok(design.onTimeMeasured - design.onTime >= 2, 'F [0] and [3] were late, whatever else is in the window');
+    assert.ok(design.throughput >= 4);
+    for (const t of d.departments) {
+      assert.equal(typeof t.throughput, 'number', t.name);
+      assert.equal(typeof t.onTimeMeasured, 'number', t.name);
+      assert.equal(typeof t.onTime, 'number', t.name);
+      assert.ok(t.onTime <= t.onTimeMeasured, t.name);
+      assert.equal(t.onTimeRate === null, t.onTimeMeasured === 0, `${t.name}: n/a exactly when nothing was measured`);
+      assert.ok(t.onTimeRate === null || (t.onTimeRate >= 0 && t.onTimeRate <= 100), t.name);
+    }
   });
 });

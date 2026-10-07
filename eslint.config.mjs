@@ -27,6 +27,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Local data, never source: uploaded files (a video agency's .ts is
+    // MPEG-TS), backups and the project-local PostgreSQL cluster.
+    "storage/**",
+    "backups/**",
+    ".data/**",
   ]),
 ]);
 

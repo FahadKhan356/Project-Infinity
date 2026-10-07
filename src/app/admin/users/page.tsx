@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { asc, sql } from 'drizzle-orm';
+import { asc, sql, ne } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { users } from '@/db/schema';
 import { requireActor } from '@/lib/auth/dal';
@@ -36,6 +36,8 @@ export default async function UsersPage() {
       )`,
     })
     .from(users)
+    // Client portal logins are managed on their client's page, not here.
+    .where(ne(users.role, 'client'))
     .orderBy(asc(users.fullName));
 
   return (

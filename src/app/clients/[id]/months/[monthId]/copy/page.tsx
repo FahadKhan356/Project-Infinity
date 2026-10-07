@@ -5,7 +5,7 @@ import { AccessDenied } from '@/components/access-denied';
 import { AppShell } from '@/components/app-shell';
 import { can } from '@/lib/authz';
 import { MonthError } from '@/lib/months/lifecycle';
-import { copyMonthPlan } from '@/lib/months/copy';
+import { copyMonthPlan, copyTarget } from '@/lib/months/copy';
 import { CopyMonthForm } from './copy-form';
 
 export default async function CopyMonthPage(props: PageProps<'/clients/[id]/months/[monthId]/copy'>) {
@@ -23,13 +23,17 @@ export default async function CopyMonthPage(props: PageProps<'/clients/[id]/mont
   const fromMonthId = Number(monthId);
   if (!Number.isInteger(clientId) || !Number.isInteger(fromMonthId)) notFound();
 
+  // A `?to=` that is not a month — the page's own field, on a browser that
+  // renders type="month" as plain text, or a hand-edited URL — is shown as
+  // the field's error over the default target, not answered with a 404.
   const { to } = await props.searchParams;
-  const period = Array.isArray(to) ? to[0] : to;
+  const target = copyTarget(Array.isArray(to) ? to[0] : to);
 
   let plan;
   try {
-    plan = await copyMonthPlan(actor, { clientId, fromMonthId, period: period ?? null });
+    plan = await copyMonthPlan(actor, { clientId, fromMonthId, period: target.period });
   } catch (error) {
+    // What is left: no such client, no such month.
     if (error instanceof MonthError) notFound();
     throw error;
   }
@@ -49,7 +53,7 @@ export default async function CopyMonthPage(props: PageProps<'/clients/[id]/mont
       </p>
 
       <div className="mt-6 max-w-3xl">
-        <CopyMonthForm plan={plan} canSetPricing={can(actor, 'pricing.view')} />
+        <CopyMonthForm plan={plan} canSetPricing={can(actor, 'pricing.view')} monthError={target.error} />
       </div>
     </AppShell>
   );
