@@ -6,6 +6,8 @@ import { can } from '@/lib/authz';
 import { backupHealth } from '@/lib/backup/health';
 import { loadDashboard, ON_TIME_WINDOW_DAYS, THROUGHPUT_WINDOW_DAYS } from '@/lib/dashboard/dashboard';
 import { jobsHealth } from '@/lib/jobs/health';
+import { salesLeaderboard } from '@/lib/leaderboard/sales';
+import { SalesLeaderboard } from '@/components/sales-leaderboard';
 import { formatMoney } from '@/lib/projects/intake';
 import { formatDateTime } from '@/lib/workspace/format';
 
@@ -58,6 +60,9 @@ export default async function DashboardPage() {
       .sort(([, a], [, b]) => (b.daysLate ?? 0) - (a.daysLate ?? 0))
       .slice(0, 10)
     : [];
+
+  // Sales, CEO and COO only (null for everyone else); privacy is applied in the query.
+  const leaderboard = await salesLeaderboard(actor);
 
   const tiles: { label: string; value: string | number; href?: string; warn?: boolean }[] = [];
   if (isExecutive && d.executive) {
@@ -171,6 +176,15 @@ export default async function DashboardPage() {
           <Tile key={t.label} {...t} />
         ))}
       </div>
+
+      {leaderboard ? (
+        <SalesLeaderboard
+          initial={leaderboard}
+          viewerId={actor.id}
+          viewerName={actor.fullName}
+          allowDemo={process.env.NODE_ENV !== 'production'}
+        />
+      ) : null}
 
       {atRisk.length > 0 ? (
         <section className="mt-8">
