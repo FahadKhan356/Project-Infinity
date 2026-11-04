@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 import Link from 'next/link';
 import { editProject, type ProjectFormState } from '../../actions';
+import { PriceWithCurrencyField } from '@/components/currency-switcher';
 
 const initial: ProjectFormState = {};
 const field =
@@ -60,12 +61,17 @@ export function EditProjectForm({ project: p, teams, canSetPricing }: Props) {
         <textarea id="otherInfo" name="otherInfo" rows={3} defaultValue={p.otherInfo ?? ''} className={field} />
 
         {canSetPricing ? (
-          <>
-            <label className="mt-4 block text-sm font-medium" htmlFor="priceAmount">Price ({p.priceCurrency})</label>
-            <input id="priceAmount" name="priceAmount" type="number" min={0} step="0.01"
-              defaultValue={p.priceAmount ?? ''} className={field} />
+          <div className="mt-4">
+            <PriceWithCurrencyField
+              amountId="priceAmount"
+              amountName="priceAmount"
+              currencyName="priceCurrency"
+              label="Price"
+              defaultAmount={p.priceAmount ?? ''}
+              defaultCurrency={p.priceCurrency}
+            />
             <p className="mt-1 text-xs text-muted">Visible only to management, Sales and the Project Manager.</p>
-          </>
+          </div>
         ) : null}
         <label className="mt-4 flex items-center gap-2 text-sm">
           <input type="checkbox" name="recursMonthly" defaultChecked={p.recursMonthly} />

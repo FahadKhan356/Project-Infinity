@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { formatMonth } from '@/lib/projects/intake';
+import { convertCurrencyAmount, DEFAULT_CURRENCY } from '@/lib/currency';
 
 /**
  * Sales leaderboard: every active Sales rep ranked by the value of the
@@ -125,16 +126,15 @@ export async function salesLeaderboard(actor: Actor): Promise<SalesLeaderboard |
 
   const repsMap = new Map<number, string>();
   const dealsList: { userId: number; amount: number; projectId: number }[] = [];
-  let currency = 'AED';
+  const currency = DEFAULT_CURRENCY;
 
   for (const r of dealRows) {
     const uid = Number(r.user_id);
     if (!repsMap.has(uid)) repsMap.set(uid, r.full_name);
-    if (r.currency) currency = r.currency;
     if (r.project_id !== null) {
       dealsList.push({
         userId: uid,
-        amount: Number(r.amount ?? 0),
+        amount: convertCurrencyAmount(Number(r.amount ?? 0), r.currency, DEFAULT_CURRENCY),
         projectId: Number(r.project_id),
       });
     }

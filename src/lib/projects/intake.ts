@@ -1,6 +1,7 @@
 import 'server-only';
 import { sql } from 'drizzle-orm';
 import type { getDb } from '@/db';
+import { normalizeCurrency } from '@/lib/currency';
 
 type Db = ReturnType<typeof getDb>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -107,7 +108,8 @@ export function formatMoney(amount: string | number | null, currency: string): s
   if (amount === null) return '—';
   const value = typeof amount === 'string' ? Number(amount) : amount;
   if (!Number.isFinite(value)) return '—';
-  return `${currency} ${value.toLocaleString('en-GB', {
+  const normalizedCurrency = normalizeCurrency(currency);
+  return `${normalizedCurrency} ${value.toLocaleString('en-GB', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;

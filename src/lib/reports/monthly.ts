@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import type { Actor, ScopeOptions } from '@/lib/authz';
 import { can, clientScope, projectScope, revisionScope } from '@/lib/authz';
 import { FEED_ACTIONS, toActivityLines, type ActivityLine, type ActivityRow } from '@/lib/activity/feed';
+import { convertCurrencyAmount, normalizeCurrency, USD_TO_PKR_RATE } from '@/lib/currency';
 
 /**
  * Monthly reporting (brief §39) and the month folder's contents (§33).
@@ -341,14 +342,16 @@ function buckets(r: Partial<BucketRow> | undefined): BucketCounts {
 }
 
 function orderValue(amount: string | null, currency: string | null): OrderValue {
-  return { amount: amount ?? '0.00', currency: currency ?? 'AED' };
+  return { amount: amount ?? '0.00', currency: normalizeCurrency(currency) };
 }
 
-/** Decimal strings summed in integer cents, so totals never pick up float noise. */
+/** Decimal strings summed in integer cents, normalized to USD. */
 function sumMoney(values: OrderValue[]): OrderValue {
-  const cents = values.reduce((acc, v) => acc + Math.round(Number(v.amount) * 100), 0);
-  const currencies = [...new Set(values.flatMap((v) => v.currency.split('/')))].sort();
-  return { amount: (cents / 100).toFixed(2), currency: currencies.join('/') || 'AED' };
+  const cents = values.reduce(
+    (acc, v) => acc + Math.round(convertCurrencyAmount(Number(v.amount), v.currency, 'USD') * 100),
+    0,
+  );
+  return { amount: (cents / 100).toFixed(2), currency: 'USD' };
 }
 
 function totalsOf(rows: PortfolioRow[], showPricing: boolean): PortfolioReport['totals'] {
@@ -383,10 +386,10 @@ async function portfolioRows(
               JOIN departments dep ON dep.id = t.department_id
              WHERE v.client_id = c.id) AS departments,
            ${showPricing
-             ? sql`(SELECT COALESCE(sum(v.price_amount), 0)::numeric(14,2)::text FROM visible v WHERE v.client_id = c.id)`
+             ? sql`(SELECT COALESCE(sum(CASE WHEN v.price_currency = 'PKR' THEN v.price_amount / ${USD_TO_PKR_RATE} ELSE v.price_amount END), 0)::numeric(14,2)::text FROM visible v WHERE v.client_id = c.id)`
              : sql`NULL::text`} AS value,
            ${showPricing
-             ? sql`(SELECT string_agg(DISTINCT v.price_currency::text, '/') FROM visible v WHERE v.client_id = c.id)`
+             ? sql`'USD'::text`
              : sql`NULL::text`} AS currency
     FROM clients c
     JOIN LATERAL (

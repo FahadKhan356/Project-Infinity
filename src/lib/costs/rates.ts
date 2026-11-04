@@ -30,7 +30,7 @@ export async function setCostRate(
   if (!Number.isFinite(input.hourlyCost) || input.hourlyCost < 0 || input.hourlyCost > 100000) {
     throw new CostRateError('Enter a valid hourly cost.');
   }
-  const currency = (input.currency ?? 'AED').toUpperCase();
+  const currency = (input.currency ?? 'USD').toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) throw new CostRateError('Enter a three-letter currency.');
 
   const db = getDb();

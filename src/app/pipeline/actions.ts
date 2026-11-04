@@ -46,7 +46,8 @@ export async function addOpportunity(_prev: PipelineFormState, formData: FormDat
   return run(
     async () => ({ ...(await createOpportunity(actor, {
       clientId, title, stage: String(formData.get('stage') ?? 'lead') as Stage,
-      estimatedValue: value(formData), expectedClose: text(formData, 'expectedClose'), notes: text(formData, 'notes'),
+      estimatedValue: value(formData), currency: text(formData, 'currency'),
+      expectedClose: text(formData, 'expectedClose'), notes: text(formData, 'notes'),
     })), clientId }),
     (r) => ({ action: 'opportunity.created', entityId: r.id!, metadata: { title } }),
     'Added to the pipeline.',
@@ -70,6 +71,7 @@ export async function editOpportunity(_prev: PipelineFormState, formData: FormDa
   return run(
     () => updateOpportunity(actor, {
       id, title: String(formData.get('title') ?? ''), estimatedValue: value(formData),
+      currency: text(formData, 'currency'),
       expectedClose: text(formData, 'expectedClose'), notes: text(formData, 'notes'),
     }),
     () => ({ action: 'opportunity.updated', entityId: id }),

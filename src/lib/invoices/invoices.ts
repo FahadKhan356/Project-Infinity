@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { can, clientScope } from '@/lib/authz';
 import { isClientVisible } from '@/lib/projects/queries';
+import { normalizeCurrency } from '@/lib/currency';
 
 type Db = ReturnType<typeof getDb>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -123,12 +124,13 @@ export async function draftFromMonth(actor: Actor, input: { clientMonthId: numbe
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('invoice-month'), ${input.clientMonthId}::int)`);
     const projects = await billableProjects(tx, input.clientMonthId);
     if (projects.length === 0) throw new InvoiceError('Nothing to invoice: every priced project this month is already billed.');
-    const currencies = new Set(projects.map((p) => p.price_currency));
+    const currencies = new Set(projects.map((p) => normalizeCurrency(p.price_currency)));
     if (currencies.size > 1) throw new InvoiceError(`These projects are priced in ${[...currencies].join(' and ')}; invoice them separately.`);
 
+    const invoiceCurrency = normalizeCurrency(projects[0].price_currency);
     const [inv] = await tx.execute<{ id: number }>(sql`
       INSERT INTO invoices (client_id, client_month_id, currency, vat_rate, created_by)
-      VALUES (${month.client_id}, ${input.clientMonthId}, ${projects[0].price_currency},
+      VALUES (${month.client_id}, ${input.clientMonthId}, ${invoiceCurrency},
               ${settings.defaultVatRate.toFixed(2)}, ${actor.id})
       RETURNING id`);
     const invoiceId = Number(inv.id);
@@ -150,8 +152,8 @@ export async function draftBlank(actor: Actor, input: { clientId: number }): Pro
   if (!(await isClientVisible(db, actor, input.clientId))) throw new InvoiceError('Choose a client.');
   const settings = await billingSettings();
   const [inv] = await db.execute<{ id: number }>(sql`
-    INSERT INTO invoices (client_id, vat_rate, created_by)
-    VALUES (${input.clientId}, ${settings.defaultVatRate.toFixed(2)}, ${actor.id}) RETURNING id`);
+    INSERT INTO invoices (client_id, currency, vat_rate, created_by)
+    VALUES (${input.clientId}, 'USD', ${settings.defaultVatRate.toFixed(2)}, ${actor.id}) RETURNING id`);
   return { invoiceId: Number(inv.id) };
 }
 

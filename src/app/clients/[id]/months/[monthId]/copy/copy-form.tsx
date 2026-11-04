@@ -4,6 +4,7 @@ import { useActionState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { copyClientMonth, type ClientFormState } from '@/app/clients/actions';
+import { PriceWithCurrencyField } from '@/components/currency-switcher';
 import type { CopyPlan } from '@/lib/months/copy';
 
 const initial: ClientFormState = {};
@@ -127,11 +128,15 @@ export function CopyMonthForm({
 
               {canSetPricing ? (
                 <div>
-                  <label className="block text-xs font-medium" htmlFor={`price_${p.id}`}>
-                    Price ({p.priceCurrency})
-                  </label>
-                  <input id={`price_${p.id}`} name={`price_${p.id}`} type="number" step="0.01" min={0}
-                    defaultValue={p.priceAmount ?? ''} className={field} />
+                  <PriceWithCurrencyField
+                    amountId={`price_${p.id}`}
+                    amountName={`price_${p.id}`}
+                    currencyName={`currency_${p.id}`}
+                    label="Price"
+                    defaultAmount={p.priceAmount ?? ''}
+                    defaultCurrency={p.priceCurrency}
+                    compact
+                  />
                 </div>
               ) : null}
 

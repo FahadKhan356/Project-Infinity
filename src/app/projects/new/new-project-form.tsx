@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createProject, type ProjectFormState } from '../actions';
 import { PendingAttachments, uploadPending } from '@/components/files/pending-attachments';
+import { PriceWithCurrencyField } from '@/components/currency-switcher';
 import type { MonthOption } from '@/lib/projects/intake';
 
 const initial: ProjectFormState = {};
@@ -20,7 +21,7 @@ interface Props {
   canCreateClients: boolean;
   preselectedClientId: number | null;
   /** Filing from a pipeline deal: the project wins it. */
-  opportunity?: { id: number; title: string; clientName: string; value: string | null } | null;
+  opportunity?: { id: number; title: string; clientName: string; value: string | null; currency?: string } | null;
 }
 
 export function NewProjectForm({
@@ -205,9 +206,14 @@ export function NewProjectForm({
 
         {canSetPricing ? (
           <div className="mt-4">
-            <label className="block text-sm font-medium" htmlFor="priceAmount">Price (AED)</label>
-            <input id="priceAmount" name="priceAmount" type="number" min={0} step="0.01" className={field}
-              defaultValue={opportunity?.value ?? ''} />
+            <PriceWithCurrencyField
+              amountId="priceAmount"
+              amountName="priceAmount"
+              currencyName="priceCurrency"
+              label="Price"
+              defaultAmount={opportunity?.value ?? ''}
+              defaultCurrency={opportunity?.currency ?? 'USD'}
+            />
             <p className="mt-1 text-xs text-muted">
               Visible only to management, Sales and the Project Manager.
             </p>

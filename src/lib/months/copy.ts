@@ -6,6 +6,7 @@ import { can, projectScope } from '@/lib/authz';
 import { formatMonth, parseMonthValue, resolveClientMonth } from '@/lib/projects/intake';
 import { insertProject, type Priority } from '@/lib/projects/file-project';
 import { isClientVisible } from '@/lib/projects/queries';
+import { normalizeCurrency, type SupportedCurrency } from '@/lib/currency';
 import { MonthError, assertMonthOpen } from './lifecycle';
 
 export interface CopyPlanDepartment {
@@ -201,6 +202,7 @@ export interface CopyProjectInput {
   departments: { departmentId: number; plannedDeliverables: number }[];
   deadline?: string | null;
   priceAmount?: string | null;
+  priceCurrency?: SupportedCurrency;
   requirements?: string | null;
   clientNotes?: string | null;
   internalNotes?: string | null;
@@ -313,6 +315,7 @@ export async function copyMonth(actor: Actor, input: CopyMonthInput): Promise<Co
         deadline: p.deadline === undefined ? null : p.deadline,
         priority: src.priority,
         priceAmount: p.priceAmount === undefined ? src.price_amount : p.priceAmount,
+        priceCurrency: p.priceCurrency ?? normalizeCurrency(src.price_currency),
         // The intake default, as filed: what a team added in the copy gets.
         requiresPmQa: src.requires_pm_qa === true,
         // A repeating order stays repeating in the month it was copied into.
@@ -365,12 +368,14 @@ export function parseCopyForm(formData: FormData): CopyMonthInput {
       const planned = Number(formData.get(`planned_${id}_${departmentId}`));
       return { departmentId, plannedDeliverables: Number.isInteger(planned) && planned > 0 ? planned : 0 };
     });
+    const rawCurrency = text(`currency_${id}`);
     return {
       sourceProjectId: id,
       title: text(`title_${id}`),
       departments,
       deadline: text(`deadline_${id}`),
       priceAmount,
+      ...(rawCurrency ? { priceCurrency: normalizeCurrency(rawCurrency) } : {}),
       requirements: text(`requirements_${id}`),
       clientNotes: text(`clientNotes_${id}`),
       internalNotes: text(`internalNotes_${id}`),

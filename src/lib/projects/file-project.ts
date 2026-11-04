@@ -8,6 +8,7 @@ import { onProjectFiled } from '@/lib/notifications/notify';
 import { PipelineError, winOpportunity } from '@/lib/pipeline/opportunities';
 import { allocateProjectCode, parseMonthValue, resolveClientMonth } from './intake';
 import { isClientVisible } from './queries';
+import { normalizeCurrency, type SupportedCurrency } from '@/lib/currency';
 
 type Db = ReturnType<typeof getDb>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -44,6 +45,7 @@ export interface ProjectIntakeInput {
   deadline?: string | null;
   priority?: Priority;
   priceAmount?: string | null;
+  priceCurrency?: SupportedCurrency;
   /** The QA route Sales chose at intake (brief §13): the default for every team that does not say for itself. */
   requiresPmQa?: boolean;
   /** Copied into each new month by the nightly job (brief §29, recurring projects). */
@@ -159,6 +161,7 @@ export async function insertProject(
   // Pricing is only accepted from someone allowed to see it, so a replayed
   // form cannot set a price its sender was never shown (brief §23).
   const priceAmount = can(actor, 'pricing.view') ? (input.priceAmount ?? null) : null;
+  const priceCurrency = normalizeCurrency(input.priceCurrency);
   // The project's intake default (brief §13): what every team row is seeded
   // with unless the caller says otherwise for that team.
   const requiresPmQa = input.requiresPmQa ?? true;
@@ -183,6 +186,7 @@ export async function insertProject(
       deadline: input.deadline ?? null,
       priority: input.priority ?? 'normal',
       priceAmount,
+      priceCurrency,
       salesOwnerId: actor.id,
       requiresPmQa,
       copiedFromProjectId: input.copiedFromProjectId ?? null,
@@ -252,6 +256,7 @@ export function parseProjectForm(formData: FormData): ProjectIntakeInput {
     deadline: text('deadline'),
     priority,
     priceAmount,
+    priceCurrency: normalizeCurrency(text('priceCurrency')),
     requiresPmQa: formData.get('requiresPmQa') === 'on',
     recursMonthly: formData.get('recursMonthly') === 'on',
     opportunityId: Number.isInteger(Number(formData.get('opportunityId'))) && formData.get('opportunityId')

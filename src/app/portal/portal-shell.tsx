@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { Actor } from '@/lib/authz';
+import { CurrencyDomSynchronizer, CurrencySwipeToggle } from '@/components/currency-switcher';
 
 /**
  * The client portal's own frame (brief §29). Deliberately not AppShell: a
@@ -12,12 +13,14 @@ export function PortalShell({ actor, clientName, children }: {
 }) {
   return (
     <div className="flex min-h-svh flex-col">
+      <CurrencyDomSynchronizer />
       <header className="border-b border-border bg-surface">
         <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 sm:px-6">
           <Link href="/portal" className="text-sm font-semibold tracking-tight">
             Aktivacity <span className="font-normal text-muted">· {clientName}</span>
           </Link>
           <div className="ml-auto flex items-center gap-4 text-sm">
+            <CurrencySwipeToggle />
             <span className="hidden text-muted sm:inline">{actor.fullName}</span>
             <Link href="/portal/invoices" className="text-muted hover:text-foreground">Invoices</Link>
             <Link href="/portal/settings" className="text-muted hover:text-foreground">Alerts</Link>

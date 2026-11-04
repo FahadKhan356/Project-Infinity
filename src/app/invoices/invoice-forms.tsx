@@ -5,6 +5,7 @@ import {
   deleteDraftAction, draftAllAction, draftBlankAction, draftMonthAction, markPaidAction, saveDraftAction,
   saveSettingsAction, voidAction, type InvoiceFormState,
 } from './actions';
+import { convertCurrencyAmount, normalizeCurrency, type SupportedCurrency } from '@/lib/currency';
 
 const initial: InvoiceFormState = {};
 const field = 'mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none focus:border-accent';
@@ -76,10 +77,21 @@ export function DraftEditor({ invoiceId, lines: initialLines, vatRate, currency,
   const [delState, delAction, deleting] = useActionState(deleteDraftAction, initial);
   const [lines, setLines] = useState<Line[]>(initialLines.map((l) => ({ ...l, key: `l${l.id}` })));
   const [rate, setRate] = useState(vatRate);
+  const [curr, setCurr] = useState<SupportedCurrency>(normalizeCurrency(currency));
   const update = (key: string, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const handleCurrencyChange = (nextCurr: SupportedCurrency) => {
+    if (nextCurr === curr) return;
+    setLines((ls) =>
+      ls.map((l) => ({
+        ...l,
+        unitPrice: Number(convertCurrencyAmount(l.unitPrice, curr, nextCurr).toFixed(2)),
+      })),
+    );
+    setCurr(nextCurr);
+  };
   const subtotal = lines.reduce((s, l) => s + Math.round(l.quantity * l.unitPrice * 100) / 100, 0);
   const vat = Math.round(subtotal * rate) / 100;
-  const money = (n: number) => `${currency} ${n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const money = (n: number) => `${curr} ${n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div>
@@ -127,7 +139,12 @@ export function DraftEditor({ invoiceId, lines: initialLines, vatRate, currency,
           </div>
           <div>
             <label className="block text-xs font-medium" htmlFor="currency">Currency</label>
-            <input id="currency" name="currency" defaultValue={currency} maxLength={3} className={field} />
+            <select id="currency" name="currency" value={curr}
+              onChange={(e) => handleCurrencyChange(normalizeCurrency(e.target.value))}
+              className={field}>
+              <option value="USD">USD ($)</option>
+              <option value="PKR">PKR (₨)</option>
+            </select>
           </div>
           <div>
             <label className="block text-xs font-medium" htmlFor="notes">Note on the invoice</label>

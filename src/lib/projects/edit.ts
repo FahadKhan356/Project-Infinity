@@ -6,6 +6,7 @@ import { can } from '@/lib/authz';
 import { isProjectVisible } from '@/lib/authz/queries';
 import { assertMonthOpen } from '@/lib/months/lifecycle';
 import { onProjectDetailsEdited } from '@/lib/notifications/notify';
+import { normalizeCurrency, type SupportedCurrency } from '@/lib/currency';
 
 export class ProjectEditError extends Error {}
 
@@ -27,6 +28,7 @@ export interface ProjectDetails {
   otherInfo: string | null;
   /** Ignored unless the actor may see pricing. */
   priceAmount: string | null;
+  priceCurrency?: SupportedCurrency;
   /** Whether the nightly job copies it into each new month (brief §29). */
   recursMonthly: boolean;
 }
@@ -50,6 +52,7 @@ export const DETAIL_LABELS: Record<EditableField, string> = {
   clientNotes: 'client notes',
   otherInfo: 'other information',
   priceAmount: 'price',
+  priceCurrency: 'currency',
   recursMonthly: 'monthly repeat',
   pmQa: 'PM QA',
 };
@@ -64,6 +67,7 @@ const COLUMNS: Record<keyof ProjectDetails, string> = {
   clientNotes: 'client_notes',
   otherInfo: 'other_info',
   priceAmount: 'price_amount',
+  priceCurrency: 'price_currency',
   recursMonthly: 'recurs_monthly',
 };
 
@@ -105,14 +109,18 @@ export async function editProjectDetails(
   await assertMonthOpen(db, { projectId: input.projectId }, (m) => new ProjectEditError(m));
 
   const editable = (Object.keys(COLUMNS) as (keyof ProjectDetails)[])
-    .filter((key) => key !== 'priceAmount' || can(actor, 'pricing.view'));
+    .filter((key) => {
+      if (key === 'priceCurrency' && input.details.priceCurrency === undefined) return false;
+      if (key === 'priceAmount' || key === 'priceCurrency') return can(actor, 'pricing.view');
+      return true;
+    });
   const next: ProjectDetails = { ...input.details, title };
 
   return db.transaction(async (tx) => {
     const [row] = await tx.execute<Record<string, string | null>>(sql`
       SELECT status, title, project_type, objective, description, po_reference,
              requirements, client_notes, other_info, price_amount::text AS price_amount,
-             recurs_monthly::text AS recurs_monthly
+             price_currency, recurs_monthly::text AS recurs_monthly
       FROM projects WHERE id = ${input.projectId} FOR UPDATE
     `);
     if (!row) throw new ProjectEditError('No such project.');
@@ -153,17 +161,18 @@ export async function editProjectDetails(
     await onProjectDetailsEdited(tx, {
       projectId: input.projectId,
       fields: changed.map((key) => DETAIL_LABELS[key]),
-      priceOnly: changed.every((key) => key === 'priceAmount'),
+      priceOnly: changed.every((key) => key === 'priceAmount' || key === 'priceCurrency'),
       actorId: actor.id,
     });
     return { projectId: input.projectId, changed };
   });
 }
 
-function normalise(key: keyof ProjectDetails, value: string | boolean | null): string | null {
-  if (value === null) return null;
+function normalise(key: keyof ProjectDetails, value: string | boolean | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
   if (key === 'recursMonthly') return String(value === true || value === 'true');
   if (key === 'priceAmount') return Number(value).toFixed(2);
+  if (key === 'priceCurrency') return normalizeCurrency(String(value));
   return String(value);
 }
 
@@ -180,6 +189,7 @@ export function parseProjectDetailsForm(formData: FormData): ProjectDetails {
     if (!Number.isFinite(value) || value < 0) throw new ProjectEditError('Enter a valid price.');
     priceAmount = value.toFixed(2);
   }
+  const rawCurrency = text('priceCurrency');
   return {
     title: String(formData.get('title') ?? ''),
     projectType: text('projectType'),
@@ -190,6 +200,7 @@ export function parseProjectDetailsForm(formData: FormData): ProjectDetails {
     clientNotes: text('clientNotes'),
     otherInfo: text('otherInfo'),
     priceAmount,
+    ...(rawCurrency ? { priceCurrency: normalizeCurrency(rawCurrency) } : {}),
     recursMonthly: formData.get('recursMonthly') === 'on',
   };
 }

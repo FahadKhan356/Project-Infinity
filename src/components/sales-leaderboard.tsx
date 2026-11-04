@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LeaderboardEntry, SalesLeaderboard as Board } from '@/lib/leaderboard/sales';
+import { CurrencySwipeToggle, useDisplayCurrency } from './currency-switcher';
+import { convertCurrencyAmount, type SupportedCurrency } from '@/lib/currency';
 
 /**
  * Real-time Sales Leaderboard with Arrival Rank-Shift Replay.
@@ -30,11 +32,12 @@ function initials(name: string) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase() ?? '').join('');
 }
 
-function money(amount: string | null, currency: string) {
+function money(amount: string | null, fromCurrency: string, displayCurrency: SupportedCurrency) {
   if (amount === null) return null;
   const n = Number(amount);
   if (!Number.isFinite(n)) return null;
-  return `${currency} ${n.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  const converted = convertCurrencyAmount(n, fromCurrency, displayCurrency);
+  return `${displayCurrency} ${converted.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 const MEDAL = ['🥇', '🥈', '🥉'];
@@ -470,6 +473,7 @@ export function SalesLeaderboard({
 
   /* ------------------------------------------------------------ render -- */
 
+  const { currency: displayCurrency } = useDisplayCurrency();
   const total = board.entries.length;
   const leaderRevenue = board.seesAllRevenue && board.entries[0]?.revenue ? Number(board.entries[0].revenue) : 0;
   const you = board.entries.find((e) => e.isYou);
@@ -499,6 +503,7 @@ export function SalesLeaderboard({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <CurrencySwipeToggle />
             {you ? (
               <span className="rounded-lg border border-accent/35 bg-accent/10 px-2.5 py-1 text-xs font-semibold text-accent">
                 You are #{you.rank} of {total}
@@ -542,6 +547,7 @@ export function SalesLeaderboard({
                 entry={e}
                 total={total}
                 currency={board.currency}
+                displayCurrency={displayCurrency}
                 share={leaderRevenue > 0 && e.revenue !== null ? Number(e.revenue) / leaderRevenue : null}
                 demo={demo}
                 onTestDeal={() => demoDeal(e.userId, 5000)}
@@ -581,19 +587,21 @@ export function SalesLeaderboard({
 }
 
 function Row({
-  entry: e, total, currency, share, demo, onTestDeal, refFn,
+  entry: e, total, currency, displayCurrency, share, demo, onTestDeal, refFn,
 }: {
   entry: LeaderboardEntry;
   total: number;
   currency: string;
+  displayCurrency: SupportedCurrency;
   share: number | null;
   demo: boolean;
   onTestDeal: () => void;
   refFn: (el: HTMLLIElement | null) => void;
 }) {
   const danger = isDanger(e.rank, total);
-  const shown = money(e.revenue, currency);
+  const shown = money(e.revenue, currency, displayCurrency);
   const rankDelta = (e.previousRank ?? e.rank) - e.rank; // positive = climbed, negative = dropped
+  const testDealLabel = money('5000', currency, displayCurrency);
 
   return (
     <li ref={refFn}
@@ -669,18 +677,18 @@ function Row({
       </div>
 
       {/* Revenue */}
-      <div className="flex shrink-0 flex-col items-end gap-1">
+      <div data-no-currency-convert="true" className="flex shrink-0 flex-col items-end gap-1">
         {shown ? (
           <span className={`text-sm font-bold tabular-nums ${e.isYou ? 'text-accent' : 'text-foreground'}`}>{shown}</span>
         ) : (
           <span className="select-none text-sm font-bold tabular-nums text-muted blur-[3px]" aria-label="Private" title="Private">
-            {currency} ••••••
+            {displayCurrency} ••••••
           </span>
         )}
         {demo && e.isYou ? (
           <button type="button" onClick={onTestDeal}
             className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 dark:text-emerald-400">
-            + Test deal ({currency} 5,000)
+            + Test deal ({testDealLabel})
           </button>
         ) : null}
       </div>

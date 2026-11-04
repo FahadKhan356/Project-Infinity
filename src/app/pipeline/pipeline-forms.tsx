@@ -3,6 +3,8 @@
 import { useActionState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { addOpportunity, changeStage, editOpportunity, markLost, type PipelineFormState } from './actions';
+import { PriceWithCurrencyField } from '@/components/currency-switcher';
+import { normalizeCurrency } from '@/lib/currency';
 
 const initial: PipelineFormState = {};
 const field =
@@ -51,8 +53,14 @@ export function NewOpportunityForm({ clients, canCreateClients }: {
             <input id="opp-title" name="title" required placeholder="Monthly social content retainer" className={field} />
           </div>
           <div>
-            <label className="block text-xs font-medium" htmlFor="opp-value">Estimated value</label>
-            <input id="opp-value" name="estimatedValue" type="number" min={0} step="0.01" className={field} />
+            <PriceWithCurrencyField
+              amountId="opp-value"
+              amountName="estimatedValue"
+              currencyName="currency"
+              label="Estimated value"
+              defaultCurrency="USD"
+              compact
+            />
           </div>
           <div>
             <label className="block text-xs font-medium" htmlFor="opp-close">Expected to close</label>
@@ -80,7 +88,7 @@ export function NewOpportunityForm({ clients, canCreateClients }: {
 }
 
 export function CardControls({ opportunity: o, canFile }: {
-  opportunity: { id: number; stage: string; title: string; estimatedValue: number | null; expectedClose: string | null; notes: string | null };
+  opportunity: { id: number; stage: string; title: string; estimatedValue: number | null; currency?: string; expectedClose: string | null; notes: string | null };
   canFile: boolean;
 }) {
   const [moveState, moveAction, moving] = useActionState(changeStage, initial);
@@ -112,8 +120,15 @@ export function CardControls({ opportunity: o, canFile }: {
           <form action={editAction} className="mt-2 space-y-1.5">
             <input type="hidden" name="id" value={o.id} />
             <input name="title" required defaultValue={o.title} aria-label="Title" className={field} />
-            <input name="estimatedValue" type="number" min={0} step="0.01" aria-label="Estimated value"
-              defaultValue={o.estimatedValue ?? ''} className={field} />
+            <div className="flex gap-1.5">
+              <select name="currency" defaultValue={normalizeCurrency(o.currency)} aria-label="Currency"
+                className="mt-1 w-20 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-accent">
+                <option value="USD">USD</option>
+                <option value="PKR">PKR</option>
+              </select>
+              <input name="estimatedValue" type="number" min={0} step="0.01" aria-label="Estimated value"
+                defaultValue={o.estimatedValue ?? ''} className={field} />
+            </div>
             <input name="expectedClose" type="date" aria-label="Expected to close" defaultValue={o.expectedClose ?? ''} className={field} />
             <input name="notes" aria-label="Notes" defaultValue={o.notes ?? ''} className={field} />
             <button type="submit" disabled={editing} className="rounded-md border border-border px-2 py-1 text-xs">Save</button>

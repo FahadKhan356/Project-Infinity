@@ -4,6 +4,7 @@ import { getDb } from '@/db';
 import type { Actor } from '@/lib/authz';
 import { can, clientScope } from '@/lib/authz';
 import { isClientVisible } from '@/lib/projects/queries';
+import { convertCurrencyAmount, normalizeCurrency } from '@/lib/currency';
 
 type Db = ReturnType<typeof getDb>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -45,6 +46,7 @@ export interface OpportunityInput {
   title: string;
   stage?: Stage;
   estimatedValue?: number | null;
+  currency?: string | null;
   expectedClose?: string | null;
   notes?: string | null;
 }
@@ -66,10 +68,11 @@ export async function createOpportunity(actor: Actor, input: OpportunityInput): 
   if (!OPEN_STAGES.includes(stage)) throw new PipelineError('A new opportunity starts in an open stage.');
   const db = getDb();
   if (!(await isClientVisible(db, actor, input.clientId))) throw new PipelineError('Choose a client.');
+  const currency = normalizeCurrency(input.currency);
   const [row] = await db.execute<{ id: number }>(sql`
-    INSERT INTO opportunities (client_id, owner_user_id, title, stage, estimated_value, expected_close, notes, created_by)
+    INSERT INTO opportunities (client_id, owner_user_id, title, stage, estimated_value, currency, expected_close, notes, created_by)
     VALUES (${input.clientId}, ${actor.id}, ${input.title.trim()}, ${stage},
-            ${input.estimatedValue == null ? null : input.estimatedValue.toFixed(2)},
+            ${input.estimatedValue == null ? null : input.estimatedValue.toFixed(2)}, ${currency},
             ${input.expectedClose || null}, ${input.notes?.trim() || null}, ${actor.id})
     RETURNING id
   `);
@@ -101,16 +104,18 @@ export async function moveOpportunity(actor: Actor, input: { id: number; stage: 
 
 export async function updateOpportunity(
   actor: Actor,
-  input: { id: number; title: string; estimatedValue: number | null; expectedClose: string | null; notes: string | null },
+  input: { id: number; title: string; estimatedValue: number | null; currency?: string | null; expectedClose: string | null; notes: string | null },
 ): Promise<{ clientId: number }> {
   if (!canUsePipeline(actor)) throw new PipelineError('You are not permitted to use the pipeline.');
   validate(input);
   const row = await loadOpen(actor, input.id);
   if (!OPEN_STAGES.includes(row.stage)) throw new PipelineError(`This opportunity is already ${row.stage}.`);
+  const currency = input.currency ? normalizeCurrency(input.currency) : null;
   await getDb().execute(sql`
     UPDATE opportunities
     SET title = ${input.title.trim()},
         estimated_value = ${input.estimatedValue == null ? null : input.estimatedValue.toFixed(2)},
+        ${currency ? sql`currency = ${currency},` : sql``}
         expected_close = ${input.expectedClose || null}, notes = ${input.notes?.trim() || null}
     WHERE id = ${input.id}
   `);
@@ -233,11 +238,14 @@ export interface StageTotal {
   weighted: number;
 }
 
-/** Per open stage: how many, what they are worth, and worth × likelihood. Single-currency sums. */
+/** Per open stage: how many, what they are worth, and worth × likelihood. Normalized to USD. */
 export function stageTotals(list: Opportunity[]): StageTotal[] {
   return OPEN_STAGES.map((stage) => {
     const inStage = list.filter((o) => o.stage === stage);
-    const value = inStage.reduce((s, o) => s + (o.estimatedValue ?? 0), 0);
+    const value = inStage.reduce(
+      (s, o) => s + (o.estimatedValue === null ? 0 : convertCurrencyAmount(o.estimatedValue, o.currency, 'USD')),
+      0,
+    );
     return { stage, count: inStage.length, value, weighted: Math.round(value * STAGE_PROBABILITY[stage] * 100) / 100 };
   });
 }

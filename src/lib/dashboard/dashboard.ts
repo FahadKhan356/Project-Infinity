@@ -5,6 +5,7 @@ import type { Actor } from '@/lib/authz';
 import { can, projectScope, revisionScope } from '@/lib/authz';
 import { upcomingDeadlines, type Deadline } from '@/lib/notifications/inbox';
 import { teamWorkload, type MemberWorkload } from '@/lib/planning/workload';
+import { USD_TO_PKR_RATE } from '@/lib/currency';
 
 /**
  * Department performance (brief §21): throughput counts the slots a team
@@ -149,17 +150,25 @@ export async function loadDashboard(actor: Actor): Promise<Dashboard> {
 
   let value: Dashboard['value'] = null;
   if (can(actor, 'pricing.view')) {
-    const [row] = await db.execute<{ currency: string | null; active: string | null; this_month: string | null }>(sql`
-      SELECT max(p.price_currency) AS currency,
-             COALESCE(sum(p.price_amount) FILTER (WHERE p.status NOT IN ('completed','cancelled')), 0)::text AS active,
-             COALESCE(sum(p.price_amount) FILTER (
-               WHERE cm.period_year = extract(year FROM current_date)::int
-                 AND cm.period_month = extract(month FROM current_date)::int
-                 AND p.status <> 'cancelled'), 0)::text AS this_month
+    const [row] = await db.execute<{ active: string | null; this_month: string | null }>(sql`
+      SELECT COALESCE(
+               sum(CASE WHEN p.price_currency = 'PKR' THEN p.price_amount / ${USD_TO_PKR_RATE} ELSE p.price_amount END)
+               FILTER (WHERE p.status NOT IN ('completed','cancelled')),
+               0
+             )::numeric(14,2)::text AS active,
+             COALESCE(
+               sum(CASE WHEN p.price_currency = 'PKR' THEN p.price_amount / ${USD_TO_PKR_RATE} ELSE p.price_amount END)
+               FILTER (
+                 WHERE cm.period_year = extract(year FROM current_date)::int
+                   AND cm.period_month = extract(month FROM current_date)::int
+                   AND p.status <> 'cancelled'
+               ),
+               0
+             )::numeric(14,2)::text AS this_month
       FROM projects p JOIN client_months cm ON cm.id = p.client_month_id
       WHERE ${scope}
     `);
-    value = { currency: row?.currency ?? 'AED', active: row?.active ?? '0', thisMonth: row?.this_month ?? '0' };
+    value = { currency: 'USD', active: row?.active ?? '0', thisMonth: row?.this_month ?? '0' };
   }
 
   const departmentFilter = isLead

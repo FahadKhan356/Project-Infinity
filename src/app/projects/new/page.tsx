@@ -64,6 +64,7 @@ export default async function NewProjectPage(props: PageProps<'/projects/new'>) 
           opportunity={openDeal ? {
             id: openDeal.id, title: openDeal.title, clientName: openDeal.clientName,
             value: can(actor, 'pricing.view') && openDeal.estimatedValue !== null ? openDeal.estimatedValue.toFixed(2) : null,
+            currency: openDeal.currency,
           } : null}
         />
       </div>

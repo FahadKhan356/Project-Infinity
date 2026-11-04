@@ -71,7 +71,7 @@ export async function saveDraftAction(_prev: InvoiceFormState, formData: FormDat
   })).filter((l) => l.description.trim() !== '' || l.id !== undefined);
   const result = await attempt(() => saveDraft(actor, {
     invoiceId, lines, notes: String(formData.get('notes') ?? ''),
-    vatRate: Number(formData.get('vatRate')), currency: String(formData.get('currency') ?? 'AED'),
+    vatRate: Number(formData.get('vatRate')), currency: String(formData.get('currency') ?? 'USD'),
   }));
   if (result.error) return result;
   if (formData.get('intent') === 'issue') {

@@ -2,6 +2,7 @@
 
 import { useActionState } from 'react';
 import { deleteCostRate, saveCostRate, type CostFormState } from './cost-actions';
+import { normalizeCurrency } from '@/lib/currency';
 
 const initial: CostFormState = {};
 const field =
@@ -24,7 +25,7 @@ export function CostRatePanel({ userId, rates, today }: { userId: number; rates:
       </p>
       <p className="mt-3 text-sm">
         {current
-          ? <>Currently <span className="font-medium tabular-nums">{current.currency} {current.hourlyCost.toFixed(2)}</span> an hour, since {current.effectiveFrom}.</>
+          ? <>Currently <span className="font-medium tabular-nums">{normalizeCurrency(current.currency)} {current.hourlyCost.toFixed(2)}</span> an hour, since {current.effectiveFrom}.</>
           : <span className="text-muted">No rate in force. Their hours are left out of project costs.</span>}
       </p>
 
@@ -33,7 +34,7 @@ export function CostRatePanel({ userId, rates, today }: { userId: number; rates:
           {rates.map((r) => (
             <li key={r.effectiveFrom} className="flex items-center justify-between px-3 py-2">
               <span>
-                from {r.effectiveFrom}: <span className="tabular-nums">{r.currency} {r.hourlyCost.toFixed(2)}</span>
+                from {r.effectiveFrom}: <span className="tabular-nums">{normalizeCurrency(r.currency)} {r.hourlyCost.toFixed(2)}</span>
                 <span className="text-xs text-muted"> · set by {r.setBy}</span>
               </span>
               <form action={removeAction}>
@@ -47,7 +48,7 @@ export function CostRatePanel({ userId, rates, today }: { userId: number; rates:
       ) : null}
       {removeState.error ? <p role="alert" className="mt-2 text-xs text-red-600">{removeState.error}</p> : null}
 
-      <form action={action} className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_6rem_auto] sm:items-end">
+      <form action={action} className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_7rem_auto] sm:items-end">
         <input type="hidden" name="userId" value={userId} />
         <div>
           <label className="block text-xs font-medium" htmlFor="effectiveFrom">From</label>
@@ -59,7 +60,10 @@ export function CostRatePanel({ userId, rates, today }: { userId: number; rates:
         </div>
         <div>
           <label className="block text-xs font-medium" htmlFor="currency">Currency</label>
-          <input id="currency" name="currency" defaultValue={current?.currency ?? 'AED'} maxLength={3} className={field} />
+          <select id="currency" name="currency" defaultValue={normalizeCurrency(current?.currency)} className={field}>
+            <option value="USD">USD ($)</option>
+            <option value="PKR">PKR (₨)</option>
+          </select>
         </div>
         <button type="submit" disabled={pending}
           className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-60">

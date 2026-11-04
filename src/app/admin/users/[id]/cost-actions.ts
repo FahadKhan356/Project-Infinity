@@ -19,7 +19,7 @@ export async function saveCostRate(_prev: CostFormState, formData: FormData): Pr
   if (!Number.isInteger(userId)) return { error: 'No such user.' };
   if (raw === '') return { error: 'Enter the hourly cost.' };
   try {
-    await setCostRate(actor, { userId, effectiveFrom, hourlyCost: Number(raw), currency: String(formData.get('currency') ?? 'AED') });
+    await setCostRate(actor, { userId, effectiveFrom, hourlyCost: Number(raw), currency: String(formData.get('currency') ?? 'USD') });
   } catch (error) {
     if (error instanceof CostRateError) return { error: error.message };
     throw error;

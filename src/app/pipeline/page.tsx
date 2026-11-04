@@ -30,8 +30,7 @@ export default async function PipelinePage() {
     `),
   ]);
   const totals = stageTotals(list);
-  const currency = list.find((o) => o.estimatedValue !== null)?.currency ?? 'AED';
-  const mixed = new Set(list.filter((o) => o.estimatedValue !== null).map((o) => o.currency)).size > 1;
+  const currency = 'USD';
   const weighted = totals.reduce((s, t) => s + t.weighted, 0);
   const openValue = totals.reduce((s, t) => s + t.value, 0);
   const closed = list.filter((o) => o.stage === 'won' || o.stage === 'lost');
@@ -47,8 +46,8 @@ export default async function PipelinePage() {
 
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
         <Tile label="Open deals" value={String(totals.reduce((s, t) => s + t.count, 0))} />
-        <Tile label="Open value" value={mixed ? 'mixed currencies' : formatMoney(openValue, currency)} />
-        <Tile label="Weighted forecast" value={mixed ? 'mixed currencies' : formatMoney(weighted, currency)}
+        <Tile label="Open value" value={formatMoney(openValue, currency)} />
+        <Tile label="Weighted forecast" value={formatMoney(weighted, currency)}
           hint="Each deal's value × its stage's likelihood" />
       </div>
 
@@ -72,7 +71,7 @@ export default async function PipelinePage() {
                   <h2 className="text-sm font-semibold">{STAGE_LABELS[stage]}</h2>
                   <span className="text-xs text-muted">{t.count} · {Math.round(STAGE_PROBABILITY[stage] * 100)}%</span>
                 </div>
-                <div className="text-xs tabular-nums text-muted">{mixed ? '' : formatMoney(t.value, currency)}</div>
+                <div className="text-xs tabular-nums text-muted">{formatMoney(t.value, currency)}</div>
               </header>
               <ul className="space-y-2 p-2">
                 {cards.length === 0 ? <li className="px-1 py-2 text-xs text-muted">Nothing here.</li> : null}
