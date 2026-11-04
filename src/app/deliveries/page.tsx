@@ -32,109 +32,167 @@ export default async function DeliveriesPage(props: PageProps<'/deliveries'>) {
 
   return (
     <AppShell actor={actor}>
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-surface px-5 py-4">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight">Deliveries</h1>
-          <p className="mt-1 max-w-prose text-sm text-muted">
+          <h1 className="text-lg font-semibold tracking-tight text-foreground">Deliveries</h1>
+          <p className="mt-1 max-w-prose text-xs text-muted">
             Approved deliverables waiting to go to the client, and what came back.
             {can(actor, 'delivery.manage') ? '' : ' Sales records each delivery; you see the list read-only.'}
           </p>
         </div>
-        <Link href={includeCompleted ? '/deliveries' : '/deliveries?all=1'} className="text-sm text-muted hover:underline">
+        <Link
+          href={includeCompleted ? '/deliveries' : '/deliveries?all=1'}
+          className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/40 hover:text-accent"
+        >
           {includeCompleted ? 'Hide completed' : 'Show completed'}
         </Link>
       </div>
 
       {rows.length === 0 ? (
-        <p className="mt-6 rounded-lg border border-border bg-surface px-4 py-6 text-sm text-muted">
+        <p className="mt-6 rounded-xl border border-border bg-surface px-5 py-8 text-sm text-muted">
           Nothing to deliver yet. Files appear here once they pass QA.
         </p>
       ) : (
-        <ol className="mt-6 space-y-4">
+        <ol className="mt-6 space-y-5">
           {rows.map((d) => (
-            <li key={d.deliveryId} className="rounded-lg border border-border bg-surface">
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-3">
+            <li key={d.deliveryId} className="overflow-hidden rounded-xl border border-border bg-surface shadow-2xs">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/40 px-5 py-3.5">
                 <div>
-                  <div className="text-sm font-semibold">
-                    {d.deliverableName}
-                    <span className="ml-2 font-normal text-muted">· {d.department}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[15px] font-semibold text-foreground">{d.deliverableName}</span>
+                    <span className="rounded-md border border-border bg-surface px-2 py-0.5 text-xs font-medium text-muted">
+                      {d.department}
+                    </span>
+                    <span className="rounded-md border border-accent/25 bg-accent/10 px-2 py-0.5 font-mono text-xs font-semibold text-accent">
+                      {d.projectCode}
+                    </span>
                   </div>
-                  <div className="mt-0.5 text-xs text-muted">
-                    <Link href={`/projects/${d.projectId}#workspace`} className="hover:underline">{d.projectTitle}</Link>
-                    {' · '}<span className="font-mono">{d.projectCode}</span>
-                    {' · '}{d.clientName}
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+                    <Link href={`/projects/${d.projectId}#workspace`} className="font-medium text-foreground/85 hover:text-accent hover:underline">
+                      {d.projectTitle}
+                    </Link>
+                    <span>·</span>
+                    <span>Client: <strong className="font-medium text-foreground/80">{d.clientName}</strong></span>
                   </div>
                 </div>
-                <span className={`rounded-md border px-2 py-0.5 text-xs ${
-                  d.status === 'pending_delivery' ? 'border-accent/40 bg-accent/5'
-                  : d.status === 'revision_required' ? 'border-red-500/40 text-red-600 dark:text-red-400'
-                  : 'border-border'}`}>
+                <span
+                  className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${
+                    d.status === 'pending_delivery'
+                      ? 'border-accent/40 bg-accent/10 text-accent'
+                      : d.status === 'revision_required'
+                        ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                        : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                  }`}
+                >
                   {statusLabel(d.status)}
                 </span>
               </div>
 
-              <div className="grid gap-5 px-5 py-4 lg:grid-cols-[1fr_1fr_18rem]">
-                <div className="text-sm">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted">File</div>
-                  <FileLink href={d.downloadUrl} filename={d.originalFilename} canDownload={canDownload}
-                    className="mt-1 inline-block font-medium hover:underline" />
-                  <div className="text-xs text-muted">v{d.versionNo} · {formatBytes(d.sizeBytes)}</div>
-                  <FilePreview url={d.downloadUrl} filename={d.originalFilename} />
+              <div className="grid gap-5 p-5 lg:grid-cols-[1fr_1.15fr_19rem]">
+                {/* File Column */}
+                <div className="rounded-lg border border-border/70 bg-background/35 p-4 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">File</span>
+                    <span className="rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">
+                      v{d.versionNo} · {formatBytes(d.sizeBytes)}
+                    </span>
+                  </div>
+                  <FileLink
+                    href={d.downloadUrl}
+                    filename={d.originalFilename}
+                    canDownload={canDownload}
+                    className="mt-2 inline-block font-semibold text-foreground hover:text-accent hover:underline"
+                  />
+                  <div className="mt-2">
+                    <FilePreview url={d.downloadUrl} filename={d.originalFilename} />
+                  </div>
                 </div>
-                <div className="text-sm">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted">QA</div>
-                  <div className="mt-1 text-xs text-muted">approved {formatDateTime(d.approvedAt)}</div>
+
+                {/* QA Column */}
+                <div className="rounded-lg border border-border/70 bg-background/35 p-4 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">QA History</span>
+                    <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                      Approved · {formatDateTime(d.approvedAt)}
+                    </span>
+                  </div>
                   {d.qaApprovals.length > 0 ? (
-                    <ul className="mt-1 space-y-1">
+                    <ul className="mt-3 space-y-2.5">
                       {d.qaApprovals.map((a, i) => (
-                        <li key={`${i}-${a.stage}`} className="text-xs">
-                          <span className="text-muted">
-                            {a.stage === 'team_lead' ? 'Team Lead' : 'Project Manager'} · {a.reviewer} · {formatDateTime(a.at)}
-                          </span>
-                          {a.comments ? <p className="whitespace-pre-wrap">{a.comments}</p> : null}
+                        <li
+                          key={`${i}-${a.stage}`}
+                          className="rounded-lg border border-border/70 bg-surface px-3 py-2 text-xs"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-1.5">
+                            <span className="font-semibold text-foreground">
+                              {a.reviewer}{' '}
+                              <span className="ml-1 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-accent">
+                                {a.stage === 'team_lead' ? 'Team Lead' : 'Project Manager'}
+                              </span>
+                            </span>
+                            <span className="tabular-nums text-[11px] text-sky-600 dark:text-sky-400">
+                              {formatDateTime(a.at)}
+                            </span>
+                          </div>
+                          {a.comments ? (
+                            <p className="mt-1.5 whitespace-pre-wrap text-muted">{a.comments}</p>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
                   ) : null}
                   {d.deliveredAt ? (
-                    <div className="mt-2 text-xs text-muted">
-                      delivered {formatDateTime(d.deliveredAt)}{d.deliveredBy ? ` by ${d.deliveredBy}` : ''}
+                    <div className="mt-3 text-xs text-muted">
+                      Delivered <span className="font-medium text-foreground">{formatDateTime(d.deliveredAt)}</span>
+                      {d.deliveredBy ? ` by ${d.deliveredBy}` : ''}
                     </div>
                   ) : null}
                   {d.clientDecision ? (
-                    <p className="mt-2 text-xs font-medium">
+                    <p className="mt-2.5 text-xs font-semibold text-foreground">
                       {d.clientDecision.decision === 'approved' ? 'Approved' : 'Changes requested'} in the portal by{' '}
                       {d.clientDecision.by}, {formatDateTime(d.clientDecision.at)}
                     </p>
                   ) : null}
                   {d.clientFeedback ? (
-                    <p className="mt-2 whitespace-pre-wrap text-xs"><span className="text-muted">Client: </span>{d.clientFeedback}</p>
+                    <p className="mt-2 whitespace-pre-wrap rounded-md border border-border bg-surface p-2.5 text-xs">
+                      <span className="font-semibold text-muted">Client: </span>
+                      {d.clientFeedback}
+                    </p>
                   ) : null}
                   {d.canRevise && (d.status === 'delivered' || d.status === 'client_feedback_received') ? (
-                    <Link href={`/projects/${d.projectId}/revisions/new?deliverable=${d.deliverableId}`}
-                      className="mt-2 inline-block text-xs font-medium text-accent hover:underline">
+                    <Link
+                      href={`/projects/${d.projectId}/revisions/new?deliverable=${d.deliverableId}`}
+                      className="mt-3 inline-block text-xs font-semibold text-accent hover:underline"
+                    >
                       Open a revision on this file →
                     </Link>
                   ) : null}
                 </div>
-                {d.canUpdate ? (
-                  <DeliveryForm
-                    deliveryId={d.deliveryId}
-                    status={d.status}
-                    next={[...DELIVERY_TRANSITIONS[d.status]]}
-                    notes={d.notes}
-                    clientFeedback={d.clientFeedback}
-                  />
-                ) : (
-                  <div className="text-xs">
-                    {d.notes ? (
-                      <p className="whitespace-pre-wrap"><span className="text-muted">Notes: </span>{d.notes}</p>
-                    ) : null}
-                    <p className={`text-muted ${d.notes ? 'mt-2' : ''}`}>
-                      Read-only. The project’s Sales rep records delivery.
-                    </p>
-                  </div>
-                )}
+
+                {/* Delivery Action Form Column */}
+                <div className="rounded-lg border border-border/70 bg-background/35 p-4">
+                  {d.canUpdate ? (
+                    <DeliveryForm
+                      deliveryId={d.deliveryId}
+                      status={d.status}
+                      next={[...DELIVERY_TRANSITIONS[d.status]]}
+                      notes={d.notes}
+                      clientFeedback={d.clientFeedback}
+                    />
+                  ) : (
+                    <div className="text-xs">
+                      {d.notes ? (
+                        <p className="whitespace-pre-wrap">
+                          <span className="font-semibold text-muted">Notes: </span>
+                          {d.notes}
+                        </p>
+                      ) : null}
+                      <p className={`text-muted ${d.notes ? 'mt-2' : ''}`}>
+                        Read-only. The project’s Sales rep records delivery.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             </li>
           ))}
