@@ -54,5 +54,9 @@
     "tsx": "^4.23.15",
     "typescript": "^5"
   },
-  "description": "Aktivacity Central Project Portal"
+  "description": "Aktivacity Central Project Portal",
+  "optionalDependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "qrcode-terminal": "^0.12.0"
+  }
 }
