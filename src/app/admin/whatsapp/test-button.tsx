@@ -18,7 +18,7 @@ export function WhatsAppTestButton() {
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
           <path strokeLinecap="round" strokeLinejoin="round" d="M3 10l4 4 8-8" />
         </svg>
-        <span>{pending ? 'Sending test alert…' : 'Send Test WhatsApp Alert to CEO & COO'}</span>
+        <span>{pending ? 'Sending test alert…' : 'Send Test WhatsApp Alert to CEO & Vice President'}</span>
       </button>
 
       {state.success ? (

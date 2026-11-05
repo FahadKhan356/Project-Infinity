@@ -17,7 +17,7 @@ import { HeaderShellClient, type NavItem } from './header-shell-client';
 
 const ROLE_LABELS: Record<Actor['role'], string> = {
   ceo: 'CEO',
-  coo: 'COO',
+  coo: 'Vice President',
   admin: 'Administrator',
   sales: 'Sales',
   project_manager: 'Project Manager',

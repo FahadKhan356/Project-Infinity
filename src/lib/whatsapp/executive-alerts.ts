@@ -156,11 +156,11 @@ export async function getExecutiveRecipients(): Promise<AlertRecipient[]> {
     }
   }
 
-  // 3. Fallback to .env for COO if not found in db
+  // 3. Fallback to .env for Vice President (COO) if not found in db
   if (!foundRoles.has('coo') && process.env.WHATSAPP_COO_PHONE?.trim()) {
     const clean = process.env.WHATSAPP_COO_PHONE.trim().replace(/[^\d+]/g, '');
     if (clean.length >= 8 && !recipients.some((r) => r.phone === clean)) {
-      recipients.push({ role: 'coo', name: 'COO', phone: clean });
+      recipients.push({ role: 'coo', name: 'Vice President', phone: clean });
     }
   }
 

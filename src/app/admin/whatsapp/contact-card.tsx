@@ -46,7 +46,7 @@ export function ContactCard({ contact }: ContactCardProps) {
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-foreground">{contact.fullName}</span>
               <span className={`rounded-full border px-2 py-0.2 text-[10px] font-bold uppercase tracking-wider ${badgeClass}`}>
-                {contact.role.replace('_', ' ')}
+                {contact.role === 'coo' ? 'Vice President' : contact.role.replace('_', ' ')}
               </span>
               {contact.source === 'env' && (
                 <span className="rounded bg-surface px-1.5 py-0.2 font-mono text-[9px] text-muted border border-border/60">

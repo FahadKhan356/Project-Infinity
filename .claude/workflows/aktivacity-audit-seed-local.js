@@ -140,7 +140,7 @@ APPROACH (important):
 DATASET (fictional Dubai creative agency; realistic names, emails, copy, AED pricing — amounts plausible for UAE agencies, e.g. 4,500–85,000 AED per project):
 - Password for EVERY seeded account: Aktivacity@2026 (meets the ≥12 chars letters+numbers policy). must_change_password=false for demo accounts.
 - Staff (role in brackets; department membership for leads/executives; emails @aktivacity.local):
-  admin@ Portal Administrator [admin]; ceo@ Khalid Al Mansoori [ceo]; coo@ Priya Raman [coo];
+  admin@ Portal Administrator [admin]; ceo@ Khalid Al Mansoori [ceo]; coo@ Ammar Shahi [coo];
   sales@ Omar Haddad [sales]; lina.farouk@ Lina Farouk [sales];
   pm@ Daniel Reyes [project_manager]; fatima.noor@ Fatima Noor [project_manager];
   Team leads: video.lead@ Hassan Qureshi (Video); design.lead@ Maya Chen (Design); dev.lead@ Arjun Mehta (Development); social.lead@ Nour El-Sayed (Social Media); seo.lead@ Rachel Adams (SEO);

@@ -106,7 +106,7 @@ export default async function AdminWhatsAppPage() {
             )}
           </div>
           <p className="mt-1 text-xs text-muted sm:text-sm">
-            Self-service WhatsApp notification manager for CEO, COO, and senior leadership.
+            Self-service WhatsApp notification manager for CEO, Vice President, and senior leadership.
           </p>
         </div>
       </div>
@@ -120,7 +120,7 @@ export default async function AdminWhatsAppPage() {
               <div>
                 <h2 className="text-sm font-semibold text-foreground">Executive Alert Contacts</h2>
                 <p className="text-xs text-muted">
-                  CEO and COO can update their phone numbers or toggle notifications directly below.
+                  CEO and Vice President can update their phone numbers or toggle notifications directly below.
                 </p>
               </div>
               <div className="flex items-center gap-1.5 text-xs text-muted">
@@ -179,10 +179,10 @@ export default async function AdminWhatsAppPage() {
             <h2 className="text-sm font-semibold text-foreground">How WhatsApp Dispatch Works</h2>
             <div className="mt-3 space-y-3 text-xs text-muted leading-relaxed">
               <p>
-                <strong className="text-foreground">1. Self-Service Updates:</strong> CEO and COO do not need to edit server files. Enter your number above, click <em>Save Number</em>, and notifications immediately switch to your phone.
+                <strong className="text-foreground">1. Self-Service Updates:</strong> CEO and Vice President do not need to edit server files. Enter your number above, click <em>Save Number</em>, and notifications immediately switch to your phone.
               </p>
               <p>
-                <strong className="text-foreground">2. Zero Scan for Receivers:</strong> CEO and COO receive regular incoming WhatsApp chats directly from the company sender bot.
+                <strong className="text-foreground">2. Zero Scan for Receivers:</strong> CEO and Vice President receive regular incoming WhatsApp chats directly from the company sender bot.
               </p>
               <p>
                 <strong className="text-foreground">3. Free Company Sender Bot:</strong> Run the Baileys gateway service on your company server and link any office SIM:
@@ -214,7 +214,7 @@ export default async function AdminWhatsAppPage() {
             </div>
             <p className="mt-2 leading-relaxed">
               {gatewayLiveStatus === 'connected'
-                ? 'Your WhatsApp sender bot is active. Real WhatsApp messages will be delivered to CEO & COO phones.'
+                ? 'Your WhatsApp sender bot is active. Real WhatsApp messages will be delivered to CEO & VP phones.'
                 : gatewayLiveStatus === 'awaiting_qr'
                   ? 'The gateway is running! Check the terminal where you ran "npm run whatsapp:gateway" and scan the QR code with WhatsApp.'
                   : 'Start the sender bot in your terminal by running: npm run whatsapp:gateway'}

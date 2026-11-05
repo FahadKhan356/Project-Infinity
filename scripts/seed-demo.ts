@@ -666,7 +666,7 @@ interface Person {
 const PEOPLE: Person[] = [
   { key: 'admin', email: 'admin@aktivacity.local', name: 'Portal Administrator', role: 'admin', dept: 'management' },
   { key: 'ceo', email: 'ceo@aktivacity.local', name: 'Khalid Al Mansoori', role: 'ceo', dept: 'management' },
-  { key: 'coo', email: 'coo@aktivacity.local', name: 'Priya Raman', role: 'coo', dept: 'management' },
+  { key: 'coo', email: 'coo@aktivacity.local', name: 'Ammar Shahi', role: 'coo', dept: 'management' },
   { key: 'omar', email: 'sales@aktivacity.local', name: 'Omar Haddad', role: 'sales', dept: 'sales' },
   { key: 'lina', email: 'lina.farouk@aktivacity.local', name: 'Lina Farouk', role: 'sales', dept: 'sales' },
   { key: 'daniel', email: 'pm@aktivacity.local', name: 'Daniel Reyes', role: 'project_manager', dept: 'pm' },
@@ -3151,7 +3151,7 @@ function scheduleInternal(): void {
     objective: 'A 90-second showreel of the year’s best work for the website, pitches and the Cityscape stand.',
     description: 'Highlights from Gulf Horizon, Al Noor and Desert Bloom (portfolio use approved by each client), plus case-study thumbnails for the website.',
     requirements: '16:9 master and a 9:16 cut; only work the clients approved for portfolio use; music from the agency’s Artlist licence.',
-    internalNotes: 'Internal and not billable. Priya is PM on this one; fit it around client work.',
+    internalNotes: 'Internal and not billable. Ammar is PM on this one; fit it around client work.',
     po: 'INTERNAL', price: null, requiresPmQa: false, priority: 'low',
     deadline: '2026-10-09', pm: 'coo', triageAt: ts('2026-09-08 11:00'), attachPo: false,
     kickoff: 'Showreel: Yusuf edits around the Al Noor reels, Zainab does the case-study thumbnails. Target is the Cityscape stand in October.',

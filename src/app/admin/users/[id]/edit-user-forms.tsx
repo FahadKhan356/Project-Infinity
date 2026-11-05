@@ -97,7 +97,7 @@ export function EditUserForms({ canManage, isSelf, user, memberships, grants: he
             <option value="project_manager">Project Manager</option>
             <option value="sales">Sales</option>
             <option value="admin">Administrator</option>
-            <option value="coo">COO</option>
+            <option value="coo">Vice President</option>
             <option value="ceo">CEO</option>
           </select>
           {isSelf ? (
