@@ -436,11 +436,11 @@ export function HeaderShellClient({
             <CurrencySwipeToggle />
 
             {/* Inbox Pill + Snackbar Trigger */}
-            <div className="flex items-center rounded-lg border border-border bg-background p-0.5">
+            <div className="flex shrink-0 items-center rounded-lg border border-border bg-background p-0.5">
               <Link
                 href="/notifications"
                 aria-label={`Inbox, ${unread} unread, ${due} due`}
-                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors ${
                   pathname.startsWith('/notifications')
                     ? 'bg-accent text-white'
                     : 'text-foreground hover:bg-surface'
@@ -463,7 +463,7 @@ export function HeaderShellClient({
                 <span>Inbox</span>
                 {unread > 0 ? (
                   <span
-                    className={`rounded-full px-1.5 py-0.2 text-[11px] font-semibold leading-4 ${
+                    className={`inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full px-1.5 text-[10px] font-bold leading-none whitespace-nowrap ${
                       pathname.startsWith('/notifications')
                         ? 'bg-white text-accent'
                         : 'bg-accent text-white'
@@ -474,13 +474,14 @@ export function HeaderShellClient({
                 ) : null}
                 {due > 0 ? (
                   <span
-                    className={`rounded-full border px-1.5 py-0.2 text-[11px] font-medium leading-4 ${
+                    className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-none whitespace-nowrap ${
                       pathname.startsWith('/notifications')
                         ? 'border-white/40 bg-white/15 text-white'
-                        : 'border-amber-500/40 bg-amber-500/12 text-amber-600 dark:text-amber-400'
+                        : 'border-amber-500/35 bg-amber-500/12 text-amber-500 dark:text-amber-400'
                     }`}
                   >
-                    {due > 99 ? '99+' : due} due
+                    <span>{due > 99 ? '99+' : due}</span>
+                    <span>due</span>
                   </span>
                 ) : null}
               </Link>
@@ -501,21 +502,21 @@ export function HeaderShellClient({
             </div>
 
             {/* User Profile Pill */}
-            <div className="hidden items-center gap-2 rounded-lg border border-border/80 bg-background/60 px-2.5 py-1 md:flex">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent/15 text-[10px] font-bold text-accent">
+            <div className="hidden shrink-0 items-center gap-2 rounded-lg border border-border/80 bg-background/60 px-2.5 py-1 whitespace-nowrap md:flex">
+              <span className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[10px] font-bold text-accent ring-1 ring-accent/20">
                 {getInitials(fullName)}
               </span>
-              <span className="text-xs font-medium text-foreground">{fullName}</span>
-              <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">
+              <span className="text-xs font-medium text-foreground whitespace-nowrap">{fullName}</span>
+              <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent whitespace-nowrap">
                 {roleLabel}
               </span>
             </div>
 
             {/* Sign out */}
-            <form action="/logout" method="post">
+            <form action="/logout" method="post" className="shrink-0">
               <button
                 type="submit"
-                className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-500"
+                className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-500 whitespace-nowrap"
               >
                 Sign out
               </button>
