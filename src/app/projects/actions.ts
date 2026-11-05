@@ -36,8 +36,9 @@ export async function createProject(
   const actor = await requireActor();
 
   let result;
+  let input;
   try {
-    const input = parseProjectForm(formData);
+    input = parseProjectForm(formData);
     if (!Number.isInteger(input.clientId)) {
       return { error: 'Choose a client. If they are new, create the client record first.' };
     }
@@ -55,6 +56,28 @@ export async function createProject(
     projectId: result.projectId,
     metadata: { projectCode: result.projectCode, monthCreated: result.monthCreated },
   });
+
+  // Notify CEO & COO on WhatsApp in background
+  try {
+    const { getDb } = await import('@/db');
+    const { sql } = await import('drizzle-orm');
+    const [clientRow] = await getDb().execute<{ name: string }>(sql`
+      SELECT name FROM clients WHERE id = ${input.clientId}
+    `);
+    import('@/lib/whatsapp/executive-alerts')
+      .then(({ notifyExecutivesNewProject }) =>
+        notifyExecutivesNewProject({
+          projectCode: result.projectCode,
+          title: input.title,
+          clientName: clientRow?.name ?? 'Client',
+          salesName: actor.fullName,
+          projectId: result.projectId,
+        }),
+      )
+      .catch((e) => console.error('[WhatsApp New Project Alert Error]', e));
+  } catch {
+    // Non-blocking
+  }
   const opportunityId = Number(formData.get('opportunityId'));
   if (formData.get('opportunityId') && Number.isInteger(opportunityId)) {
     await recordActivity({

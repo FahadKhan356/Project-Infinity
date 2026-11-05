@@ -23,7 +23,8 @@
     "backup:list": "node --env-file-if-exists=.env scripts/backup.mjs list",
     "projects:recurring": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/run-recurring.ts",
     "jobs:nightly": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/nightly.ts",
-    "notifications:dispatch": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/dispatch-notifications.ts"
+    "notifications:dispatch": "node --env-file-if-exists=.env --conditions=react-server --import tsx scripts/dispatch-notifications.ts",
+    "whatsapp:gateway": "node scripts/whatsapp-gateway.mjs"
   },
   "engines": {
     "node": ">=22.12"

@@ -178,6 +178,41 @@ export async function createAssignment(
       title, deliverables: count, endDate: input.endDate ?? null, actorId: actor.id,
     });
 
+    // Notify CEO & COO on WhatsApp in background
+    try {
+      const [meta] = await tx.execute<{
+        code: string;
+        proj_title: string;
+        dept_name: string;
+        assignee_name: string;
+      }>(sql`
+        SELECT p.code, p.title AS proj_title, d.name AS dept_name, u.full_name AS assignee_name
+        FROM projects p
+        JOIN project_departments pd ON pd.id = ${input.projectDepartmentId}
+        JOIN departments d ON d.id = pd.department_id
+        JOIN users u ON u.id = ${input.assigneeId}
+        WHERE p.id = ${Number(team.project_id)}
+      `);
+      if (meta) {
+        import('@/lib/whatsapp/executive-alerts')
+          .then(({ notifyExecutivesAssignment }) =>
+            notifyExecutivesAssignment({
+              projectCode: meta.code,
+              projectTitle: meta.proj_title,
+              department: meta.dept_name,
+              executiveName: meta.assignee_name,
+              deliverableNames: [title],
+              startsOn: input.startDate ?? null,
+              endsOn: input.endDate ?? null,
+              teamId: input.projectDepartmentId,
+            }),
+          )
+          .catch((err) => console.error('[WhatsApp Assignment Alert Error]', err));
+      }
+    } catch {
+      // Non-blocking
+    }
+
     return {
       assignmentId: assignment.id,
       projectId: Number(team.project_id),

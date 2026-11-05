@@ -154,6 +154,34 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
       projectId: input.projectId, revisionId, revisionNo, title, deliverableIds, actorId: actor.id,
     });
 
+    // Notify CEO & COO on WhatsApp in background
+    try {
+      const [meta] = await tx.execute<{ code: string; title: string; client_name: string }>(sql`
+        SELECT p.code, p.title, c.name AS client_name
+        FROM projects p
+        JOIN clients c ON c.id = p.client_id
+        WHERE p.id = ${input.projectId}
+      `);
+      if (meta) {
+        import('@/lib/whatsapp/executive-alerts')
+          .then(({ notifyExecutivesRevision }) =>
+            notifyExecutivesRevision({
+              projectCode: meta.code,
+              projectTitle: meta.title,
+              clientName: meta.client_name,
+              revisionNo,
+              title,
+              clientFeedback: feedback,
+              priority: input.priority ?? 'normal',
+              revisionId,
+            }),
+          )
+          .catch((err) => console.error('[WhatsApp Revision Alert Error]', err));
+      }
+    } catch {
+      // Non-blocking for revision creation
+    }
+
     return { revisionId, revisionNo, projectId: input.projectId, deliverableIds, projectStatus };
   });
 }

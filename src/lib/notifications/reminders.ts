@@ -99,6 +99,28 @@ export async function sendDeadlineReminders(options: ReminderOptions = {}): Prom
         entityType: item.kind,
         entityId: item.id,
       });
+
+      // Send WhatsApp alert to CEO & COO if due within 24 hours or overdue
+      if (item.daysLeft <= 1) {
+        try {
+          import('@/lib/whatsapp/executive-alerts')
+            .then(({ notifyExecutivesDeadline }) =>
+              notifyExecutivesDeadline({
+                projectCode: item.projectCode,
+                projectTitle: item.title,
+                title: item.title,
+                kind: item.kind,
+                due: item.due,
+                daysLeft: item.daysLeft,
+                clientName: '',
+                linkPath: item.linkPath,
+              }),
+            )
+            .catch((e) => console.error('[WhatsApp Deadline Alert Error]', e));
+        } catch {
+          // Non-blocking
+        }
+      }
     }
   }
   return { usersChecked: people.length, sent };
