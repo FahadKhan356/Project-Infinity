@@ -163,6 +163,17 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
         WHERE p.id = ${input.projectId}
       `);
       if (meta) {
+        const delivRows = await tx.execute<{ title: string; dept_name: string; assignee_name: string | null }>(sql`
+          SELECT dl.title, d.name AS dept_name, u.full_name AS assignee_name
+          FROM deliverables dl
+          JOIN departments d ON d.id = dl.department_id
+          LEFT JOIN assignments a ON a.id = dl.assignment_id
+          LEFT JOIN users u ON u.id = a.user_id
+          WHERE dl.id IN (${idList})
+        `);
+        const deliverablesSummary = delivRows.map((d) => `${d.title} (${d.dept_name})`).join(', ');
+        const assignees = [...new Set(delivRows.map((d) => d.assignee_name).filter(Boolean))].join(', ');
+
         import('@/lib/whatsapp/executive-alerts')
           .then(({ notifyExecutivesRevision }) =>
             notifyExecutivesRevision({
@@ -173,6 +184,9 @@ export async function createRevision(actor: Actor, input: RevisionInput): Promis
               title,
               clientFeedback: feedback,
               priority: input.priority ?? 'normal',
+              deliverablesSummary: deliverablesSummary || null,
+              assignedTeamOrExecutive: assignees || null,
+              deadline: input.deadline ?? null,
               revisionId,
             }),
           )

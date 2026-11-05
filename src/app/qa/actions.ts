@@ -41,12 +41,19 @@ export async function submitReview(
   try {
     const { getDb } = await import('@/db');
     const { sql } = await import('drizzle-orm');
-    const [proj] = await getDb().execute<{ code: string; title: string; dept_name: string }>(sql`
-      SELECT p.code, p.title, d.name AS dept_name
+    const [proj] = await getDb().execute<{
+      code: string;
+      title: string;
+      dept_name: string;
+      producer_name: string | null;
+    }>(sql`
+      SELECT p.code, p.title, d.name AS dept_name, u.full_name AS producer_name
       FROM projects p
       JOIN deliverables del ON del.project_id = p.id
       JOIN project_departments pd ON pd.id = del.project_department_id
       JOIN departments d ON d.id = pd.department_id
+      LEFT JOIN assignments a ON a.id = del.assignment_id
+      LEFT JOIN users u ON u.id = a.user_id
       WHERE del.id = ${result.deliverableId}
       LIMIT 1
     `);
@@ -58,6 +65,7 @@ export async function submitReview(
             projectTitle: proj.title,
             deliverableName: result.deliverableName,
             department: proj.dept_name,
+            producerName: proj.producer_name,
             reviewerName: actor.fullName,
             reviewerRole: actor.role === 'team_lead' ? 'Team Lead' : 'Project Manager',
             decision: result.decision,

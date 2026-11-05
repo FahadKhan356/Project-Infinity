@@ -71,6 +71,7 @@ export async function createProject(
           title: input.title,
           clientName: clientRow?.name ?? 'Client',
           salesName: actor.fullName,
+          period: input.period,
           projectId: result.projectId,
         }),
       )

@@ -200,6 +200,7 @@ export async function createAssignment(
               projectCode: meta.code,
               projectTitle: meta.proj_title,
               department: meta.dept_name,
+              assignerName: actor.fullName,
               executiveName: meta.assignee_name,
               deliverableNames: [title],
               startsOn: input.startDate ?? null,

@@ -103,6 +103,12 @@ export async function sendDeadlineReminders(options: ReminderOptions = {}): Prom
       // Send WhatsApp alert to CEO & COO if due within 24 hours or overdue
       if (item.daysLeft <= 1) {
         try {
+          const [proj] = await db.execute<{ client_name: string }>(sql`
+            SELECT c.name AS client_name
+            FROM projects p
+            JOIN clients c ON c.id = p.client_id
+            WHERE p.id = ${item.projectId}
+          `);
           import('@/lib/whatsapp/executive-alerts')
             .then(({ notifyExecutivesDeadline }) =>
               notifyExecutivesDeadline({
@@ -112,7 +118,8 @@ export async function sendDeadlineReminders(options: ReminderOptions = {}): Prom
                 kind: item.kind,
                 due: item.due,
                 daysLeft: item.daysLeft,
-                clientName: '',
+                clientName: proj?.client_name ?? null,
+                assigneeName: actor.fullName,
                 linkPath: item.linkPath,
               }),
             )

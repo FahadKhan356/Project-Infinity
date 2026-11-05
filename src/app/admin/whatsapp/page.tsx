@@ -1,10 +1,14 @@
-import Link from 'next/link';
 import { requireActor } from '@/lib/auth/dal';
 import { AccessDenied } from '@/components/access-denied';
 import { AppShell } from '@/components/app-shell';
 import { can } from '@/lib/authz';
-import { getExecutiveRecipients } from '@/lib/whatsapp/executive-alerts';
+import {
+  getExecutiveContactsManagement,
+  getEligibleManagementUsers,
+  getExecutiveRecipients,
+} from '@/lib/whatsapp/executive-alerts';
 import { WhatsAppTestButton } from './test-button';
+import { ContactCard, AddRecipientForm } from './contact-card';
 
 export default async function AdminWhatsAppPage() {
   const actor = await requireActor();
@@ -16,9 +20,13 @@ export default async function AdminWhatsAppPage() {
     );
   }
 
-  const recipients = await getExecutiveRecipients();
-  const gatewayUrl = process.env.WHATSAPP_GATEWAY_URL?.trim();
-  const metaToken = process.env.WHATSAPP_TOKEN?.trim();
+  const [recipients, contacts, availableUsers] = await Promise.all([
+    getExecutiveRecipients(),
+    getExecutiveContactsManagement(),
+    getEligibleManagementUsers(),
+  ]);
+
+  const gatewayUrl = process.env.WHATSAPP_GATEWAY_URL?.trim() || 'http://localhost:3001/send';
 
   let gatewayLiveStatus: 'connected' | 'awaiting_qr' | 'offline' = 'offline';
   if (gatewayUrl) {
@@ -36,36 +44,40 @@ export default async function AdminWhatsAppPage() {
 
   const MONITORED_TRIGGERS = [
     {
+      title: 'New Client Deal & Intake',
+      desc: 'Dispatches when Sales files a new project awaiting Project Manager review in the Project Closure Report (PCR).',
+      badge: 'Active Trigger',
+      icon: '🌟',
+    },
+    {
       title: 'Client Revisions',
-      desc: 'Sent immediately when a client files a revision round or requests changes on deliverables.',
+      desc: 'Dispatches immediately when a client files a revision round or requests changes on deliverables.',
       badge: 'Active Trigger',
       icon: '🔄',
     },
     {
       title: 'QA Review Decisions',
-      desc: 'Sent when a Team Lead or PM Approves, Requests Changes, or Rejects a deliverable file.',
+      desc: 'Dispatches when a Team Lead or PM Approves, Requests Changes, or Rejects a deliverable file.',
       badge: 'Active Trigger',
       icon: '🛡️',
     },
     {
       title: 'Work Allocations & Assignments',
-      desc: 'Sent when a Team Lead assigns project deliverables to production executives.',
+      desc: 'Dispatches when a Team Lead assigns project deliverables to production executives.',
       badge: 'Active Trigger',
       icon: '📋',
     },
     {
-      title: 'Urgent Deadlines & Overdue',
-      desc: 'Sent when any project or assignment comes within 24 hours of deadline or becomes overdue.',
+      title: 'Critical Deadlines & Overdue',
+      desc: 'Dispatches when any project or assignment comes within 24 hours of deadline or becomes overdue.',
       badge: 'Active Trigger',
       icon: '⏰',
     },
-    {
-      title: 'New Project Triage (Intake)',
-      desc: 'Sent when Sales files a new project awaiting Project Manager triage in the PCR.',
-      badge: 'Active Trigger',
-      icon: '✨',
-    },
   ];
+
+  // Filter available users to those not already in contacts
+  const existingUserIds = new Set(contacts.map((c) => c.userId));
+  const candidateUsers = availableUsers.filter((u) => !existingUserIds.has(u.id));
 
   return (
     <AppShell actor={actor}>
@@ -94,7 +106,7 @@ export default async function AdminWhatsAppPage() {
             )}
           </div>
           <p className="mt-1 text-xs text-muted sm:text-sm">
-            Automated real-time WhatsApp dispatch for CEO and COO on critical operational events.
+            Self-service WhatsApp notification manager for CEO, COO, and senior leadership.
           </p>
         </div>
       </div>
@@ -102,50 +114,32 @@ export default async function AdminWhatsAppPage() {
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         {/* Left Column: Configuration & Status (2 cols) */}
         <div className="space-y-6 lg:col-span-2">
-          {/* Active Recipients Card */}
+          {/* Executive Contacts Management Card */}
           <div className="overflow-hidden rounded-xl border border-border/80 bg-surface/90 shadow-xs backdrop-blur-xs">
-            <div className="border-b border-border/70 bg-background/35 px-5 py-4">
-              <h2 className="text-sm font-semibold text-foreground">Registered Executive Recipients</h2>
-              <p className="text-xs text-muted">
-                These phone numbers receive WhatsApp alerts on the 5 monitored events.
-              </p>
+            <div className="border-b border-border/70 bg-background/35 px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">Executive Alert Contacts</h2>
+                <p className="text-xs text-muted">
+                  CEO and COO can update their phone numbers or toggle notifications directly below.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-muted">
+                <span className="font-semibold text-foreground">{recipients.length}</span> active recipient(s)
+              </div>
             </div>
 
-            <div className="p-5">
-              {recipients.length === 0 ? (
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-400">
-                  <span className="font-semibold">No CEO/COO phone numbers configured yet!</span>
-                  <p className="mt-1">
-                    Add <code className="rounded bg-background/80 px-1 py-0.2">WHATSAPP_CEO_PHONE</code> and{' '}
-                    <code className="rounded bg-background/80 px-1 py-0.2">WHATSAPP_COO_PHONE</code> to your{' '}
-                    <code className="rounded bg-background/80 px-1 py-0.2">.env</code> file (e.g. +923001234567), or set them under their User settings.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {recipients.map((r, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/40 p-3.5"
-                    >
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-sm font-bold text-emerald-400">
-                        {r.role.toUpperCase()}
-                      </span>
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-semibold text-foreground">{r.name}</span>
-                          <span className="rounded bg-accent/10 px-1.5 py-0.2 text-[10px] font-bold uppercase tracking-wider text-accent">
-                            {r.role}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 font-mono text-xs text-muted">{r.phone}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+            <div className="p-5 space-y-4">
+              {contacts.map((contact) => (
+                <ContactCard key={contact.userId} contact={contact} />
+              ))}
+
+              {candidateUsers.length > 0 && (
+                <AddRecipientForm availableUsers={candidateUsers} />
               )}
 
-              <WhatsAppTestButton />
+              <div className="pt-2">
+                <WhatsAppTestButton />
+              </div>
             </div>
           </div>
 
@@ -153,7 +147,9 @@ export default async function AdminWhatsAppPage() {
           <div className="overflow-hidden rounded-xl border border-border/80 bg-surface/90 shadow-xs backdrop-blur-xs">
             <div className="border-b border-border/70 bg-background/35 px-5 py-4">
               <h2 className="text-sm font-semibold text-foreground">5 Automated Executive Triggers</h2>
-              <p className="text-xs text-muted">Each action immediately prepares and dispatches an alert message.</p>
+              <p className="text-xs text-muted">
+                Each operational event dispatches a context-rich message specifying who acted, what changed, and direct portal links.
+              </p>
             </div>
 
             <div className="divide-y divide-border/60">
@@ -180,24 +176,19 @@ export default async function AdminWhatsAppPage() {
         {/* Right Column: Setup & Connection Guide */}
         <div className="space-y-6">
           <div className="rounded-xl border border-border/80 bg-surface/90 p-5 shadow-xs backdrop-blur-xs">
-            <h2 className="text-sm font-semibold text-foreground">How WhatsApp Alerts Work</h2>
+            <h2 className="text-sm font-semibold text-foreground">How WhatsApp Dispatch Works</h2>
             <div className="mt-3 space-y-3 text-xs text-muted leading-relaxed">
               <p>
-                <strong className="text-foreground">1. No Scan Needed for CEO/COO:</strong> The CEO and COO receive standard incoming messages directly on their personal WhatsApp numbers.
+                <strong className="text-foreground">1. Self-Service Updates:</strong> CEO and COO do not need to edit server files. Enter your number above, click <em>Save Number</em>, and notifications immediately switch to your phone.
               </p>
               <p>
-                <strong className="text-foreground">2. Free 100% WhatsApp Gateway:</strong> Run an open-source WhatsApp Web Gateway (Baileys / Evolution API) on the company server and scan once with the company office SIM.
+                <strong className="text-foreground">2. Zero Scan for Receivers:</strong> CEO and COO receive regular incoming WhatsApp chats directly from the company sender bot.
               </p>
               <p>
-                <strong className="text-foreground">3. Environment Variables in .env:</strong>
+                <strong className="text-foreground">3. Free Company Sender Bot:</strong> Run the Baileys gateway service on your company server and link any office SIM:
               </p>
               <pre className="overflow-x-auto rounded-lg border border-border/70 bg-background/90 p-2.5 font-mono text-[11px] text-foreground">
-{`WHATSAPP_CEO_PHONE="+923001234567"
-WHATSAPP_COO_PHONE="+923007654321"
-
-# Free Webhook / Baileys Gateway (e.g. port 3001)
-WHATSAPP_GATEWAY_URL="http://localhost:3001/send"
-PORTAL_BASE_URL="http://localhost:3000"`}
+{`npm run whatsapp:gateway`}
               </pre>
             </div>
           </div>
