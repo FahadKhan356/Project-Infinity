@@ -63,7 +63,7 @@ export async function AppShell({ actor, children }: { actor: Actor; children: Re
     { show: !canViewReports(actor) && canViewProductivity(actor), href: '/reports/productivity', label: 'Productivity', group: 'management' },
     { show: canViewActivityLog(actor), href: '/activity', label: 'Activity', group: 'management' },
     { show: can(actor, 'users.view'), href: '/admin/users', label: 'Users', group: 'management' },
-    { show: can(actor, 'users.manage'), href: '/admin/whatsapp', label: 'WhatsApp Alerts', group: 'management' },
+    { show: actor.role === 'ceo' || actor.role === 'coo', href: '/admin/whatsapp', label: 'WhatsApp Alerts', group: 'management' },
   ];
 
   const links: NavItem[] = rawLinks

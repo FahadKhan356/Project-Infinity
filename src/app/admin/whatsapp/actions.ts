@@ -23,8 +23,8 @@ export async function saveExecutiveContact(
   formData: FormData,
 ): Promise<WhatsAppAdminState> {
   const actor = await requireActor();
-  if (!can(actor, 'users.manage')) {
-    return { error: 'You are not permitted to manage notifications.' };
+  if (actor.role !== 'ceo' && actor.role !== 'coo') {
+    return { error: 'Only the CEO and COO are permitted to manage executive WhatsApp alerts.' };
   }
 
   const userId = Number(formData.get('userId'));
@@ -64,8 +64,8 @@ export async function removeExecutiveContact(
   formData: FormData,
 ): Promise<WhatsAppAdminState> {
   const actor = await requireActor();
-  if (!can(actor, 'users.manage')) {
-    return { error: 'You are not permitted to manage notifications.' };
+  if (actor.role !== 'ceo' && actor.role !== 'coo') {
+    return { error: 'Only the CEO and COO are permitted to manage executive WhatsApp alerts.' };
   }
 
   const userId = Number(formData.get('userId'));
@@ -96,8 +96,8 @@ export async function sendTestAlert(
   _formData: FormData,
 ): Promise<WhatsAppAdminState> {
   const actor = await requireActor();
-  if (!can(actor, 'users.manage')) {
-    return { error: 'You are not permitted to manage notifications.' };
+  if (actor.role !== 'ceo' && actor.role !== 'coo') {
+    return { error: 'Only the CEO and COO are permitted to trigger test alerts.' };
   }
 
   const recipients = await getExecutiveRecipients();

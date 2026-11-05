@@ -12,10 +12,10 @@ import { ContactCard, AddRecipientForm } from './contact-card';
 
 export default async function AdminWhatsAppPage() {
   const actor = await requireActor();
-  if (!can(actor, 'users.manage')) {
+  if (actor.role !== 'ceo' && actor.role !== 'coo') {
     return (
       <AppShell actor={actor}>
-        <AccessDenied what="WhatsApp alerts management" />
+        <AccessDenied what="executive WhatsApp alerts" />
       </AppShell>
     );
   }
