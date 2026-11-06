@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { NotificationIcon } from './notification-icon';
 import { extractProjectMeta, getNotificationStyle } from './notification-meta';
 import { CurrencyDomSynchronizer, CurrencySwipeToggle } from './currency-switcher';
+import { ThemeToggle } from './theme-switcher';
 
 export interface NavItem {
   href: string;
@@ -384,6 +385,10 @@ export function HeaderShellClient({
                     className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-accent"
                   />
                 </form>
+                <div className="mb-2 flex items-center justify-between gap-2 border-b border-border/70 pb-2">
+                  <CurrencySwipeToggle />
+                  <ThemeToggle />
+                </div>
                 {groupedLinks.map((section) => (
                   <div key={section.group} className="py-1">
                     <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted/80">
@@ -434,6 +439,9 @@ export function HeaderShellClient({
 
             {/* Global Currency Swipe Toggle ($ USD <-> ₨ PKR) */}
             <CurrencySwipeToggle />
+
+            {/* Global Dual Theme Toggle (🌙 Dark <-> ☀️ Light) */}
+            <ThemeToggle />
 
             {/* Inbox Pill + Snackbar Trigger */}
             <div className="flex shrink-0 items-center rounded-lg border border-border bg-background p-0.5">

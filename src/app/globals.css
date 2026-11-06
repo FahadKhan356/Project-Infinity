@@ -1,37 +1,56 @@
 @import "tailwindcss";
 
+@variant dark (&:where(.dark, .dark *));
+
 /*
- * No webfonts by design: next/font/google downloads at build time, and this
- * application must build and run on an internal server with no internet
- * access (brief §46).
+ * Professional Dual Theme Color Architecture (Default: Dark Mode)
+ * Handcrafted for Senior Product Design standards (Linear / Raycast / Stripe aesthetic).
  */
-:root {
-  --background: #f6f7f9;
-  --surface: #ffffff;
-  --foreground: #14181f;
-  --muted: #5d6673;
-  --border: #dfe3e8;
-  --accent: #1f5eff;
+
+/* 1. Default & Dark Theme (Dark by Default) */
+:root,
+html.dark,
+[data-theme="dark"] {
+  --background: #090d12;
+  --surface: #121820;
+  --surface-raised: #17202b;
+  --surface-hover: #1d2734;
+  --foreground: #f1f5f9;
+  --muted: #8290a3;
+  --border: #222b37;
+  --border-subtle: #18212c;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0d1116;
-    --surface: #151b23;
-    --foreground: #e6eaf0;
-    --muted: #8c96a5;
-    --border: #262e39;
-    --accent: #5b8cff;
-  }
+/* 2. Light Theme (Refined Studio White & Slate) */
+html.light,
+[data-theme="light"] {
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --surface-raised: #f1f5f9;
+  --surface-hover: #e2e8f0;
+  --foreground: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --border-subtle: #edf2f7;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  color-scheme: light;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-hover: var(--surface-hover);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -41,6 +60,7 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 /* Sales leaderboard level-up snackbar: drops in from the top. */
